@@ -293,6 +293,24 @@ def init_db():
         );
         """)
 
+        # ── 舊資料庫升級：補齊 v1.3 新增欄位（ALTER TABLE ADD COLUMN 若欄位已存在會丟例外，忽略即可）──
+        upgrade_sqls = [
+            "ALTER TABLE Users          ADD COLUMN email        TEXT DEFAULT ''",
+            "ALTER TABLE Users          ADD COLUMN display_name TEXT DEFAULT ''",
+            "ALTER TABLE ClassSessions  ADD COLUMN created_by   TEXT NOT NULL DEFAULT 'system'",
+            "ALTER TABLE LeaveRequests  ADD COLUMN session_id   INTEGER",
+            "ALTER TABLE LeaveRequests  ADD COLUMN reviewed_by  INTEGER",
+            "ALTER TABLE LeaveRequests  ADD COLUMN reviewed_at  TEXT",
+            "ALTER TABLE LeaveRequests  ADD COLUMN reject_reason TEXT DEFAULT ''",
+            "ALTER TABLE Payments       ADD COLUMN paid_time    TEXT",
+            "ALTER TABLE Payments       ADD COLUMN created_at   TEXT NOT NULL DEFAULT ''",
+        ]
+        for sql in upgrade_sqls:
+            try:
+                cur.execute(sql)
+            except Exception:
+                pass  # 欄位已存在時忽略
+
         # ── 桌次 1~8 ────────────────────────────────────────
         for i in range(1, 9):
             cur.execute("INSERT OR IGNORE INTO Tables(id,name) VALUES(?,?)", (i, f"桌{i}"))
