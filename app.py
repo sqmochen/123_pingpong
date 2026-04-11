@@ -1,5 +1,5 @@
 # ============================================================
-# 🏓 桌球教室管理與互動系統 - app.py  v1.4
+# 🏓 桌球教室管理與互動系統 - app.py  v1.5
 # Ping-Pong Academy Manager
 # ============================================================
 
@@ -30,7 +30,7 @@ div[data-testid="metric-container"] {
     border-radius: 8px; padding: 12px 16px;
 }
 .stButton > button { border-radius: 8px; font-weight: 600; }
-.page-title { font-size:1.6rem; font-weight:700; color:#1a1a2e; margin-bottom:0.2rem; }
+.page-title  { font-size:1.6rem; font-weight:700; color:#1a1a2e; margin-bottom:0.2rem; }
 .section-title { font-size:1.1rem; font-weight:600; color:#FF6B35; margin:1rem 0 0.5rem 0; }
 .role-badge-admin   { background:#FF6B35; color:white; padding:2px 10px; border-radius:12px; font-size:0.8rem; font-weight:600; }
 .role-badge-coach   { background:#2196F3; color:white; padding:2px 10px; border-radius:12px; font-size:0.8rem; font-weight:600; }
@@ -66,8 +66,9 @@ def calc_end_time(start, duration):
     return f"{em//60:02d}:{em%60:02d}"
 
 def check_table_conflict(conn, schedule_day, schedule_time, duration, table_id, exclude_id=None):
-    new_start = time_to_minutes(schedule_time)
-    new_end   = new_start + int(duration)
+    """時段重疊衝突比對：new_start < ex_end AND new_end > ex_start"""
+    ns = time_to_minutes(schedule_time)
+    ne = ns + int(duration)
     rows = conn.execute(
         "SELECT id, schedule_time, duration FROM Courses WHERE schedule_day=? AND table_id=?",
         (schedule_day, table_id)).fetchall()
@@ -75,16 +76,16 @@ def check_table_conflict(conn, schedule_day, schedule_time, duration, table_id, 
     for row in rows:
         if exclude_id and row["id"] == exclude_id:
             continue
-        ex_start = time_to_minutes(row["schedule_time"])
-        ex_end   = ex_start + row["duration"]
-        if new_start < ex_end and new_end > ex_start:
+        es = time_to_minutes(row["schedule_time"])
+        ee = es + row["duration"]
+        if ns < ee and ne > es:
             conflicts.append(row)
     return conflicts
 
 def make_course_code(schedule_day, table_id, schedule_time, duration):
+    """課程代號：星期碼-桌次-HHMM-時長3碼"""
     day_map = {"週一":"1","週二":"2","週三":"3","週四":"4","週五":"5","週六":"6","週日":"7"}
-    hhmm    = schedule_time.replace(":", "")
-    return f"{day_map[schedule_day]}-{table_id}-{hhmm}-{str(duration).zfill(3)}"
+    return f"{day_map[schedule_day]}-{table_id}-{schedule_time.replace(':','')}-{str(duration).zfill(3)}"
 
 def get_display_name(conn, user_id, role):
     if role == "student":
@@ -97,11 +98,8 @@ def get_display_name(conn, user_id, role):
 
 def generate_date_options():
     wd = ["一","二","三","四","五","六","日"]
-    result = []
-    for i in range(7):
-        d = date.today() + timedelta(days=i)
-        result.append((f"{d.strftime('%Y-%m-%d')}（{wd[d.weekday()]}）", d))
-    return result
+    return [(f"{(date.today()+timedelta(days=i)).strftime('%Y-%m-%d')}（{wd[(date.today()+timedelta(days=i)).weekday()]}）",
+             date.today()+timedelta(days=i)) for i in range(7)]
 
 WEEKDAY_TO_INT = {"週一":0,"週二":1,"週三":2,"週四":3,"週五":4,"週六":5,"週日":6}
 
@@ -298,7 +296,7 @@ def login_page():
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.4</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.5</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -371,8 +369,7 @@ def sidebar():
         st.divider()
         if st.button("🚪 登出", use_container_width=True):
             logout()
-        st.markdown("---\n<small>📢 本系統供桌球教室內部使用。</small>",
-                    unsafe_allow_html=True)
+        st.markdown("---\n<small>📢 本系統供桌球教室內部使用。</small>", unsafe_allow_html=True)
     return selected
 
 
@@ -400,9 +397,9 @@ def page_my_courses():
         st.info("目前尚未報名任何課程，請聯繫管理者報名。")
         return
     c1,c2,c3 = st.columns(3)
-    c1.metric("已報名課程數",   len(df))
-    c2.metric("每月費用合計",   f"NT$ {df['費用_元'].sum():,.0f}")
-    c3.metric("平均課程時長",   f"{df['時長_分鐘'].mean():.0f} 分鐘")
+    c1.metric("已報名課程數", len(df))
+    c2.metric("每月費用合計", f"NT$ {df['費用_元'].sum():,.0f}")
+    c3.metric("平均課程時長", f"{df['時長_分鐘'].mean():.0f} 分鐘")
     st.divider()
     st.dataframe(df, use_container_width=True, height=320)
 
@@ -670,8 +667,8 @@ def page_coach_attendance():
             session_id = cur.lastrowid
         else:
             session_id = sess["id"]
-        existing        = conn.execute("SELECT student_id,status FROM Attendance WHERE session_id=?",
-                                       (session_id,)).fetchall()
+        existing = conn.execute("SELECT student_id,status FROM Attendance WHERE session_id=?",
+                                (session_id,)).fetchall()
         approved_leaves = set(r["student_id"] for r in conn.execute("""
             SELECT student_id FROM LeaveRequests
             WHERE course_id=? AND leave_date=? AND status='approved'
@@ -782,13 +779,28 @@ def page_coach_leave_review():
 # 🔧  管理者功能
 # ══════════════════════════════════════════════════════════════
 
+def _delete_courses_batch(del_ids):
+    """批次刪除課程及其所有關聯資料"""
+    with get_conn() as conn:
+        for cid in del_ids:
+            conn.execute("DELETE FROM Enrollments WHERE course_id=?", (cid,))
+            for s in conn.execute("SELECT id FROM ClassSessions WHERE course_id=?",
+                                  (cid,)).fetchall():
+                conn.execute("DELETE FROM Attendance WHERE session_id=?", (s["id"],))
+            conn.execute("DELETE FROM ClassSessions WHERE course_id=?", (cid,))
+            conn.execute("DELETE FROM LeaveRequests WHERE course_id=?", (cid,))
+            conn.execute("DELETE FROM Payments WHERE course_id=?", (cid,))
+            conn.execute("DELETE FROM Courses WHERE id=?", (cid,))
+        conn.commit()
+
+
 def page_admin_courses():
     st.markdown('<div class="page-title">📅 課程管理</div>', unsafe_allow_html=True)
     st.divider()
     tab_list, tab_add, tab_enroll, tab_visual = st.tabs(
         ["📋 課程總表", "➕ 新增課程", "🎓 學員報名管理", "🏓 桌次視覺化"])
 
-    # ── Tab 1：課程總表 + 多筆批次刪除 ──────────────────────
+    # ── Tab 1：課程總表 + 全選 + 三層防呆批次刪除 ──────────
     with tab_list:
         with get_conn() as conn:
             df = pd.read_sql_query("""
@@ -803,6 +815,7 @@ def page_admin_courses():
                 LEFT JOIN Enrollments e ON e.course_id=c.id
                 GROUP BY c.id ORDER BY c.schedule_day, c.schedule_time
             """, conn)
+
         if df.empty:
             st.info("目前無課程資料。")
         else:
@@ -811,18 +824,53 @@ def page_admin_courses():
             st.dataframe(
                 df[["課程ID","課程類型","教練","星期","開始時間","結束時間","時長_分鐘","桌次","報名人數"]],
                 use_container_width=True, height=300)
+
             st.divider()
             st.markdown('<div class="section-title">🗑️ 批次刪除課程</div>', unsafe_allow_html=True)
-            st.caption("勾選欲刪除的課程，確認後系統將一併刪除所有關聯資料（無法還原）。")
+            st.caption("勾選欲刪除的課程，需通過三層確認後執行（此操作不可復原）。")
+
+            # ── 全選控制 ────────────────────────────────────
+            all_ids = df["_id"].tolist()
+            total_count = len(all_ids)
+
+            # 計算目前各課程勾選狀態以決定全選核取方塊預設值
+            current_checks = [
+                st.session_state.get(f"del_chk_{cid}", False)
+                for cid in all_ids
+            ]
+            all_checked = all(current_checks) and total_count > 0
+
+            select_all = st.checkbox(
+                f"☑️ 全選 / 取消全選（共 {total_count} 筆課程）",
+                value=all_checked,
+                key="select_all_courses"
+            )
+
+            # 當全選狀態改變時，同步所有課程核取方塊
+            if select_all != all_checked:
+                for cid in all_ids:
+                    st.session_state[f"del_chk_{cid}"] = select_all
+
+            # ── 逐筆課程核取方塊 ─────────────────────────────
             selected_ids = []
             for _, row in df.iterrows():
-                label = f"{row['課程ID']} — {row['課程類型']} {row['星期']} {row['開始時間']}"
-                if st.checkbox(label, key=f"del_chk_{row['_id']}"):
+                label = (f"{row['課程ID']} — {row['課程類型']} "
+                         f"{row['星期']} {row['開始時間']}～{row['結束時間']} "
+                         f"（{row['教練']} / {row['桌次']}）")
+                checked = st.checkbox(label, key=f"del_chk_{row['_id']}")
+                if checked:
                     selected_ids.append(int(row["_id"]))
 
-            if selected_ids and st.button("🔍 查看關聯資料並確認刪除", type="primary"):
-                st.session_state["pending_delete_ids"] = selected_ids
+            st.markdown("---")
 
+            # ── 第一層防呆：未選取任何課程阻擋 ───────────────
+            if st.button("🔍 查看關聯資料並確認刪除", type="primary"):
+                if not selected_ids:
+                    st.warning("⚠️ 請至少選取一筆課程後再執行。")
+                else:
+                    st.session_state["pending_delete_ids"] = selected_ids
+
+            # ── 第二層防呆：關聯資料警示確認 + 第三層：文字輸入
             if "pending_delete_ids" in st.session_state:
                 del_ids = st.session_state["pending_delete_ids"]
                 with get_conn() as conn:
@@ -834,36 +882,53 @@ def page_admin_courses():
                         JOIN ClassSessions cs ON a.session_id=cs.id WHERE cs.course_id=?
                     """, (c,)).fetchone()[0] for c in del_ids)
                     total_unpaid = sum(conn.execute(
-                        "SELECT COUNT(*) FROM Payments WHERE course_id=? AND is_paid=0", (c,)).fetchone()[0]
-                        for c in del_ids)
+                        "SELECT COUNT(*) FROM Payments WHERE course_id=? AND is_paid=0",
+                        (c,)).fetchone()[0] for c in del_ids)
+
                 st.warning(
-                    f"⚠️ 已選 **{len(del_ids)}** 筆課程，關聯資料：\n\n"
-                    f"- 合計報名人數：{total_enroll} 筆\n"
-                    f"- 合計出勤紀錄：{total_attend} 筆\n"
-                    f"- 合計未繳費紀錄：{total_unpaid} 筆\n\n"
-                    "確認後將一併刪除所有關聯紀錄，此操作**無法還原**。")
-                confirm = st.checkbox("確認刪除以上所有勾選課程", key="confirm_batch_del")
-                if st.button("🗑️ 執行批次刪除", key="do_batch_del"):
-                    if not confirm:
-                        st.warning("請先勾選「確認刪除以上所有勾選課程」。")
-                    else:
-                        with get_conn() as conn:
-                            for cid in del_ids:
-                                conn.execute("DELETE FROM Enrollments WHERE course_id=?", (cid,))
-                                for s in conn.execute(
-                                        "SELECT id FROM ClassSessions WHERE course_id=?",
-                                        (cid,)).fetchall():
-                                    conn.execute("DELETE FROM Attendance WHERE session_id=?", (s["id"],))
-                                conn.execute("DELETE FROM ClassSessions WHERE course_id=?", (cid,))
-                                conn.execute("DELETE FROM LeaveRequests WHERE course_id=?", (cid,))
-                                conn.execute("DELETE FROM Payments WHERE course_id=?", (cid,))
-                                conn.execute("DELETE FROM Courses WHERE id=?", (cid,))
-                            conn.commit()
+                    f"⚠️ **刪除警告** — 已選 **{len(del_ids)}** 筆課程，關聯資料如下：\n\n"
+                    f"- 合計報名人數：**{total_enroll}** 筆\n"
+                    f"- 合計出勤紀錄：**{total_attend}** 筆\n"
+                    f"- 合計未繳費紀錄：**{total_unpaid}** 筆\n\n"
+                    "確認後將**永久刪除**所有關聯紀錄，此操作**無法還原**。")
+
+                # 第二層：核取方塊確認
+                layer2 = st.checkbox(
+                    "✅ 我已了解刪除後關聯資料將一併清除，且此操作無法復原",
+                    key="layer2_confirm")
+
+                # 第三層：文字輸入確認
+                layer3_input = st.text_input(
+                    "🔐 請在下方輸入「確認刪除」以解鎖執行按鈕",
+                    placeholder="請輸入：確認刪除",
+                    key="layer3_text")
+                layer3_ok = (layer3_input.strip() == "確認刪除")
+
+                # 執行按鈕（三層全通過才可點擊）
+                btn_disabled = not (layer2 and layer3_ok)
+                if not layer2:
+                    st.caption("👆 請先勾選上方確認核取方塊（第二層確認）")
+                elif not layer3_ok:
+                    st.caption("👆 請輸入「確認刪除」以解鎖執行按鈕（第三層確認）")
+
+                col_exec, col_cancel = st.columns(2)
+                with col_exec:
+                    if st.button("🗑️ 執行批次刪除", key="do_batch_del",
+                                 disabled=btn_disabled, type="primary"):
+                        _delete_courses_batch(del_ids)
                         del st.session_state["pending_delete_ids"]
+                        # 清除所有勾選 session state
+                        for cid in all_ids:
+                            if f"del_chk_{cid}" in st.session_state:
+                                del st.session_state[f"del_chk_{cid}"]
                         st.success(f"✅ 已成功刪除 {len(del_ids)} 筆課程。")
                         st.rerun()
+                with col_cancel:
+                    if st.button("❌ 取消", key="cancel_batch_del"):
+                        del st.session_state["pending_delete_ids"]
+                        st.rerun()
 
-    # ── Tab 2：新增課程（無費用欄位，含課程代號預覽）────────
+    # ── Tab 2：新增課程 ──────────────────────────────────────
     with tab_add:
         with get_conn() as conn:
             coaches = pd.read_sql_query("SELECT id,name FROM Coaches ORDER BY name", conn)
@@ -876,13 +941,14 @@ def page_admin_courses():
                 with c1:
                     c_type    = st.selectbox("課程類型", ["團體班","個人班","寒假班","暑假班"])
                     coach_sel = st.selectbox("選擇教練", list(coach_map.keys()))
-                    day       = st.selectbox("上課星期", ["週一","週二","週三","週四","週五","週六","週日"])
+                    day       = st.selectbox("上課星期",
+                                             ["週一","週二","週三","週四","週五","週六","週日"])
                     time_val  = st.time_input("上課時間",
                                               value=datetime.strptime("09:00","%H:%M").time())
                 with c2:
-                    duration = st.selectbox("課程時長（分鐘）", [60, 90, 120])
-                    table_no = st.selectbox("使用桌次", list(range(1,9)))
-                    time_str = time_val.strftime("%H:%M")
+                    duration  = st.selectbox("課程時長（分鐘）", [60, 90, 120])
+                    table_no  = st.selectbox("使用桌次", list(range(1,9)))
+                    time_str  = time_val.strftime("%H:%M")
                     st.markdown("**課程ID 預覽**")
                     st.code(make_course_code(day, table_no, time_str, duration))
                 submitted = st.form_submit_button("✅ 新增課程", type="primary")
@@ -898,7 +964,7 @@ def page_admin_courses():
                             for c in conflicts:
                                 st.error(
                                     f"⚠️ 桌次 {table_no} 時段衝突"
-                                    f"（{c['schedule_time']}～{calc_end_time(c['schedule_time'], c['duration'])}），"
+                                    f"（{c['schedule_time']}～{calc_end_time(c['schedule_time'],c['duration'])}），"
                                     "請重新選擇。")
                         else:
                             try:
@@ -914,7 +980,7 @@ def page_admin_courses():
                             except Exception as e:
                                 st.error(f"新增失敗：{e}")
 
-    # ── Tab 3：學員報名管理（選單格式 + 費用欄位）───────────
+    # ── Tab 3：學員報名管理 ──────────────────────────────────
     with tab_enroll:
         with get_conn() as conn:
             all_courses = pd.read_sql_query("""
@@ -967,8 +1033,8 @@ def page_admin_courses():
                 st.markdown("**新增學員報名**")
                 if not_yet:
                     add_stu = st.selectbox("選擇學員", not_yet, key="add_stu")
-                    add_fee = st.number_input("費用（元）", min_value=0, value=2000, step=100,
-                                              key="add_fee")
+                    add_fee = st.number_input("費用（元）", min_value=0, value=2000,
+                                              step=100, key="add_fee")
                     if st.button("➕ 加入報名", type="primary"):
                         try:
                             now_str = datetime.now().isoformat()
@@ -990,7 +1056,7 @@ def page_admin_courses():
                 else:
                     st.info("所有學員皆已報名此課程。")
 
-    # ── Tab 4：桌次甘特圖（色塊標註課程類別與教練）──────────
+    # ── Tab 4：桌次視覺化（色塊標註課程類別與教練）──────────
     with tab_visual:
         st.markdown('<div class="section-title">🏓 選定星期的桌次甘特圖</div>', unsafe_allow_html=True)
         sel_day = st.selectbox("選擇星期",
@@ -1108,8 +1174,8 @@ def page_admin_payments():
                COALESCE(p.paid_date,'—') AS 繳費日期,
                COALESCE(p.paid_time,'—') AS 繳費時間, p.is_paid
         FROM Payments p
-        JOIN Students s ON p.student_id=s.id
-        JOIN Courses  c ON p.course_id=c.id
+        JOIN Students s  ON p.student_id=s.id
+        JOIN Courses  c  ON p.course_id=c.id
         JOIN Coaches  co ON c.coach_id=co.id
     """
     params = []
@@ -1130,13 +1196,11 @@ def page_admin_payments():
     c2.metric("已收金額",   f"NT$ {paid_amt:,.0f}")
     c3.metric("未收金額",   f"NT$ {unpaid_amt:,.0f}")
     st.divider()
-    # 表格顯示
     display = df.copy()
     display["狀態"]   = display["is_paid"].apply(lambda x: "✅ 已繳" if x else "❌ 未繳")
     display["繳交費用"] = display["繳交費用"].apply(lambda x: f"NT$ {x:,.0f}")
     st.dataframe(display.drop(columns=["id","is_paid"]),
                  use_container_width=True, height=360)
-    # 未繳費逐筆標記
     unpaid_df = df[df["is_paid"]==0]
     if not unpaid_df.empty:
         st.divider()
@@ -1146,10 +1210,8 @@ def page_admin_payments():
                     f"❌ {row['學員']} ｜ {row['課程類別']} {row['上課時間']} ｜ "
                     f"{row['期別']} ｜ NT$ {row['繳交費用']:,.0f}"):
                 mc1,mc2 = st.columns(2)
-                pay_date = mc1.date_input("繳費日期", value=date.today(),
-                                          key=f"pdate_{row['id']}")
-                pay_time = mc2.time_input("繳費時間", value=datetime.now().time(),
-                                          key=f"ptime_{row['id']}")
+                pay_date = mc1.date_input("繳費日期", value=date.today(), key=f"pdate_{row['id']}")
+                pay_time = mc2.time_input("繳費時間", value=datetime.now().time(), key=f"ptime_{row['id']}")
                 if st.button("💳 標記為已繳費", key=f"pay_{row['id']}", type="primary"):
                     with get_conn() as conn:
                         conn.execute("UPDATE Payments SET is_paid=1,paid_date=?,paid_time=? WHERE id=?",
@@ -1162,14 +1224,22 @@ def page_admin_payments():
 def page_admin_reports():
     st.markdown('<div class="page-title">📈 報表查詢</div>', unsafe_allow_html=True)
     st.divider()
+
+    # 全局日期篩選（供 Tab 1~3 與 Tab 4~5 共用）
     c1,c2 = st.columns(2)
-    start_date = c1.date_input("起始日期", value=date.today().replace(day=1))
-    end_date   = c2.date_input("結束日期",  value=date.today())
+    start_date = c1.date_input("起始日期", value=date.today().replace(day=1),
+                               key="report_start")
+    end_date   = c2.date_input("結束日期",  value=date.today(), key="report_end")
     if start_date > end_date:
         st.error("起始日期不可晚於結束日期。")
         return
-    tab1,tab2,tab3 = st.tabs(["📅 課程報表","👥 出勤統計報表","💰 繳費統計報表"])
 
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📅 課程報表", "👥 出勤統計報表", "💰 繳費統計報表",
+        "🏫 教練上課查詢", "🎓 學員上課與繳費查詢"
+    ])
+
+    # ── Tab 1：課程報表 ──────────────────────────────────────
     with tab1:
         with get_conn() as conn:
             df = pd.read_sql_query("""
@@ -1189,12 +1259,13 @@ def page_admin_reports():
             st.info("此區間無上課紀錄。")
         else:
             c1,c2 = st.columns(2)
-            c1.metric("上課總堂數", len(df))
+            c1.metric("上課總堂數",   len(df))
             c2.metric("平均出席人數", f"{df['出席學員數'].mean():.1f}")
             st.dataframe(df, use_container_width=True, height=350)
             st.download_button("⬇️ 匯出 CSV", df.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"課程報表_{start_date}_{end_date}.csv", mime="text/csv")
 
+    # ── Tab 2：出勤統計報表 ──────────────────────────────────
     with tab2:
         with get_conn() as conn:
             df2 = pd.read_sql_query("""
@@ -1221,6 +1292,7 @@ def page_admin_reports():
             st.download_button("⬇️ 匯出 CSV", df2.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"出勤統計_{start_date}_{end_date}.csv", mime="text/csv")
 
+    # ── Tab 3：繳費統計報表 ──────────────────────────────────
     with tab3:
         ps = start_date.strftime("%Y-%m")
         pe = end_date.strftime("%Y-%m")
@@ -1244,8 +1316,9 @@ def page_admin_reports():
             c2.metric("已收",   f"NT$ {paid_f:,.0f}")
             c3.metric("未收",   f"NT$ {unpaid_f:,.0f}")
             c4.metric("繳費率", f"{paid_f/total_f*100:.1f}%" if total_f else "0%")
-            fig = go.Figure(go.Pie(labels=["已繳費","未繳費"], values=[paid_f,unpaid_f],
-                                   hole=0.4, marker_colors=["#4CAF50","#F44336"]))
+            fig = go.Figure(go.Pie(labels=["已繳費","未繳費"],
+                                   values=[paid_f, unpaid_f], hole=0.4,
+                                   marker_colors=["#4CAF50","#F44336"]))
             fig.update_layout(height=300, margin=dict(l=0,r=0,t=20,b=0))
             st.plotly_chart(fig, use_container_width=True)
             df3["已繳"] = df3["已繳"].apply(lambda x: "✅ 已繳" if x else "❌ 未繳")
@@ -1253,6 +1326,253 @@ def page_admin_reports():
             st.dataframe(df3, use_container_width=True, height=300)
             st.download_button("⬇️ 匯出 CSV", df3.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"繳費統計_{start_date}_{end_date}.csv", mime="text/csv")
+
+    # ── Tab 4：教練上課查詢（v1.5 新增）────────────────────
+    with tab4:
+        st.markdown('<div class="section-title">🏫 教練上課查詢</div>', unsafe_allow_html=True)
+        with get_conn() as conn:
+            coaches_list = pd.read_sql_query(
+                "SELECT id, name FROM Coaches ORDER BY name", conn)
+
+        if coaches_list.empty:
+            st.info("目前無教練資料。")
+        else:
+            coach_options = ["全部教練"] + coaches_list["name"].tolist()
+            coach_id_map  = dict(zip(coaches_list["name"], coaches_list["id"]))
+            sel_coach     = st.selectbox("選擇教練", coach_options, key="rpt_coach_sel")
+
+            # 查詢條件組裝
+            if sel_coach == "全部教練":
+                coach_filter_sql = ""
+                coach_params     = [start_date.isoformat(), end_date.isoformat()]
+                fname            = "全部教練"
+            else:
+                coach_filter_sql = " AND cs.coach_id=?"
+                coach_params     = [start_date.isoformat(), end_date.isoformat(),
+                                    coach_id_map[sel_coach]]
+                fname            = sel_coach
+
+            with get_conn() as conn:
+                df4 = pd.read_sql_query(f"""
+                    SELECT cs.session_date AS 上課日期,
+                           COALESCE(c.course_code,'—') AS 課程ID,
+                           c.course_type AS 課程類型, c.schedule_day AS 星期,
+                           cs.session_time AS 上課時間, t.name AS 桌次,
+                           co.name AS 教練,
+                           SUM(CASE WHEN a.status='present' THEN 1 ELSE 0 END) AS 出席人數,
+                           SUM(CASE WHEN a.status='absent'  THEN 1 ELSE 0 END) AS 缺席人數,
+                           SUM(CASE WHEN a.status='leave'   THEN 1 ELSE 0 END) AS 請假人數
+                    FROM ClassSessions cs
+                    JOIN Courses  c  ON cs.course_id=c.id
+                    JOIN Coaches  co ON cs.coach_id=co.id
+                    JOIN Tables   t  ON cs.table_id=t.id
+                    LEFT JOIN Attendance a ON a.session_id=cs.id
+                    WHERE cs.session_date BETWEEN ? AND ?{coach_filter_sql}
+                    GROUP BY cs.id ORDER BY cs.session_date DESC
+                """, conn, params=coach_params)
+
+            if df4.empty:
+                st.info("此區間無上課紀錄。")
+            else:
+                # 統計指標
+                unique_courses = df4["課程ID"].nunique()
+                total_sessions = len(df4)
+                avg_present    = df4["出席人數"].mean()
+                c1,c2,c3 = st.columns(3)
+                c1.metric("負責課程數",   unique_courses)
+                c2.metric("上課總堂數",   total_sessions)
+                c3.metric("平均每堂出席人數", f"{avg_present:.1f}")
+                st.divider()
+
+                # 表格
+                show_cols = ["上課日期","課程ID","課程類型","星期","上課時間","桌次",
+                             "出席人數","缺席人數","請假人數"]
+                if sel_coach == "全部教練":
+                    show_cols.insert(3, "教練")
+                st.dataframe(df4[show_cols], use_container_width=True, height=340)
+
+                # 折線圖：每日出席人數
+                st.markdown('<div class="section-title">📈 每日出席人數趨勢</div>',
+                            unsafe_allow_html=True)
+                daily_present = df4.groupby("上課日期")["出席人數"].sum().reset_index()
+                fig4 = go.Figure(go.Scatter(
+                    x=daily_present["上課日期"], y=daily_present["出席人數"],
+                    mode="lines+markers", line=dict(color="#FF6B35", width=2),
+                    marker=dict(size=6)))
+                fig4.update_layout(
+                    height=280,
+                    xaxis_title="上課日期", yaxis_title="出席人數",
+                    margin=dict(l=0,r=0,t=10,b=0))
+                st.plotly_chart(fig4, use_container_width=True)
+
+                # CSV 匯出
+                csv4 = df4[show_cols].to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "⬇️ 匯出 CSV",
+                    data=csv4,
+                    file_name=f"教練上課查詢_{fname}_{start_date}_{end_date}.csv",
+                    mime="text/csv")
+
+    # ── Tab 5：學員上課與繳費查詢（v1.5 新增）──────────────
+    with tab5:
+        st.markdown('<div class="section-title">🎓 學員上課與繳費查詢</div>',
+                    unsafe_allow_html=True)
+        with get_conn() as conn:
+            students_list = pd.read_sql_query(
+                "SELECT id, name FROM Students ORDER BY name", conn)
+
+        if students_list.empty:
+            st.info("目前無學員資料。")
+        else:
+            stu_options = ["全部學員"] + students_list["name"].tolist()
+            stu_id_map  = dict(zip(students_list["name"], students_list["id"]))
+            sel_stu     = st.selectbox("選擇學員", stu_options, key="rpt_stu_sel")
+
+            is_all_stu = (sel_stu == "全部學員")
+            fname_stu  = sel_stu
+
+            # 出勤查詢條件
+            if is_all_stu:
+                att_filter = ""
+                att_params = [start_date.isoformat(), end_date.isoformat()]
+            else:
+                att_filter = " AND a.student_id=?"
+                att_params = [start_date.isoformat(), end_date.isoformat(),
+                              stu_id_map[sel_stu]]
+
+            # 繳費查詢條件（不受日期區間限制）
+            if is_all_stu:
+                pay_filter = ""
+                pay_params = []
+            else:
+                pay_filter = " WHERE p.student_id=?"
+                pay_params = [stu_id_map[sel_stu]]
+
+            with get_conn() as conn:
+                # 出勤資料
+                df5_att = pd.read_sql_query(f"""
+                    SELECT cs.session_date AS 上課日期,
+                           COALESCE(c.course_code,'—') AS 課程ID,
+                           c.course_type AS 課程類型, co.name AS 教練,
+                           cs.session_time AS 上課時間, s.name AS 學員,
+                           CASE a.status WHEN 'present' THEN '✅ 出席'
+                             WHEN 'absent' THEN '❌ 缺席' WHEN 'leave' THEN '🟡 請假'
+                           END AS 出勤狀態,
+                           a.status AS _status
+                    FROM Attendance a
+                    JOIN ClassSessions cs ON a.session_id=cs.id
+                    JOIN Courses  c  ON cs.course_id=c.id
+                    JOIN Coaches  co ON cs.coach_id=co.id
+                    JOIN Students s  ON a.student_id=s.id
+                    WHERE cs.session_date BETWEEN ? AND ?{att_filter}
+                    ORDER BY cs.session_date DESC, s.name
+                """, conn, params=att_params)
+
+                # 繳費資料
+                df5_pay = pd.read_sql_query(f"""
+                    SELECT p.period AS 期別,
+                           COALESCE(c.course_code,'—') AS 課程ID,
+                           c.course_type AS 課程類型, co.name AS 教練,
+                           s.name AS 學員, p.amount AS 應繳金額,
+                           COALESCE(p.paid_date,'—') AS 繳費日期,
+                           COALESCE(p.paid_time,'—') AS 繳費時間,
+                           p.is_paid
+                    FROM Payments p
+                    JOIN Students s  ON p.student_id=s.id
+                    JOIN Courses  c  ON p.course_id=c.id
+                    JOIN Coaches  co ON c.coach_id=co.id
+                    {pay_filter}
+                    ORDER BY p.period DESC, s.name
+                """, conn, params=pay_params)
+
+                # 報名課程數
+                if is_all_stu:
+                    enroll_cnt = conn.execute(
+                        "SELECT COUNT(*) FROM Enrollments").fetchone()[0]
+                else:
+                    enroll_cnt = conn.execute(
+                        "SELECT COUNT(*) FROM Enrollments WHERE student_id=?",
+                        (stu_id_map[sel_stu],)).fetchone()[0]
+
+            # 統計指標
+            present_cnt = (df5_att["_status"]=="present").sum() if not df5_att.empty else 0
+            total_att   = len(df5_att)
+            att_rate    = present_cnt / total_att * 100 if total_att > 0 else 0
+            paid_total  = df5_pay[df5_pay["is_paid"]==1]["應繳金額"].sum() if not df5_pay.empty else 0
+            unpaid_total= df5_pay[df5_pay["is_paid"]==0]["應繳金額"].sum() if not df5_pay.empty else 0
+
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.metric("報名課程數",  enroll_cnt)
+            c2.metric("出席次數",    present_cnt)
+            c3.metric("出席率",      f"{att_rate:.1f}%")
+            c4.metric("已繳費總額",  f"NT$ {paid_total:,.0f}")
+            c5.metric("未繳費總額",  f"NT$ {unpaid_total:,.0f}")
+            st.divider()
+
+            # ① 出勤紀錄子表格
+            st.markdown('<div class="section-title">① 出勤紀錄</div>', unsafe_allow_html=True)
+            if df5_att.empty:
+                st.info("此區間無出勤紀錄。")
+            else:
+                att_cols = ["上課日期","課程ID","課程類型","教練","上課時間","出勤狀態"]
+                if is_all_stu:
+                    att_cols.insert(2, "學員")
+                st.dataframe(df5_att[att_cols], use_container_width=True, height=280)
+                csv5_att = df5_att[att_cols].to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "⬇️ 匯出出勤 CSV", data=csv5_att,
+                    file_name=f"學員出勤查詢_{fname_stu}_{start_date}_{end_date}.csv",
+                    mime="text/csv")
+
+                # 近 6 個月出勤分組長條圖
+                st.markdown('<div class="section-title">📊 近 6 個月出勤統計</div>',
+                            unsafe_allow_html=True)
+                with get_conn() as conn:
+                    chart_q = f"""
+                        SELECT substr(cs.session_date,1,7) AS 月份, a.status, COUNT(*) AS 次數
+                        FROM Attendance a JOIN ClassSessions cs ON a.session_id=cs.id
+                        WHERE cs.session_date >= date('now','-6 months'){att_filter.replace('AND a.student_id=?','AND a.student_id=?')}
+                        GROUP BY 月份, a.status
+                    """
+                    chart_params = ([] if is_all_stu else [stu_id_map[sel_stu]])
+                    chart5 = pd.read_sql_query(chart_q, conn, params=chart_params)
+                if not chart5.empty:
+                    pivot5 = chart5.pivot_table(
+                        index="月份", columns="status", values="次數", fill_value=0)
+                    color_map5 = {"present":"#4CAF50","absent":"#F44336","leave":"#FF9800"}
+                    label_map5 = {"present":"出席","absent":"缺席","leave":"請假"}
+                    fig5 = go.Figure()
+                    for col in pivot5.columns:
+                        fig5.add_trace(go.Bar(
+                            name=label_map5.get(col,col), x=pivot5.index, y=pivot5[col],
+                            marker_color=color_map5.get(col,"#999")))
+                    fig5.update_layout(barmode="group", height=280,
+                                       margin=dict(l=0,r=0,t=10,b=0),
+                                       legend=dict(orientation="h"))
+                    st.plotly_chart(fig5, use_container_width=True)
+
+            st.divider()
+
+            # ② 繳費紀錄子表格
+            st.markdown('<div class="section-title">② 繳費紀錄（全期別）</div>',
+                        unsafe_allow_html=True)
+            if df5_pay.empty:
+                st.info("目前無繳費紀錄。")
+            else:
+                df5_pay_disp = df5_pay.copy()
+                df5_pay_disp["狀態"] = df5_pay_disp["is_paid"].apply(
+                    lambda x: "✅ 已繳" if x else "❌ 未繳")
+                df5_pay_disp["應繳金額"] = df5_pay_disp["應繳金額"].apply(
+                    lambda x: f"NT$ {x:,.0f}")
+                pay_cols = ["期別","課程ID","課程類型","教練","應繳金額","繳費日期","繳費時間","狀態"]
+                if is_all_stu:
+                    pay_cols.insert(2, "學員")
+                st.dataframe(df5_pay_disp[pay_cols], use_container_width=True, height=280)
+                csv5_pay = df5_pay_disp[pay_cols].to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "⬇️ 匯出繳費 CSV", data=csv5_pay,
+                    file_name=f"學員繳費查詢_{fname_stu}.csv",
+                    mime="text/csv")
 
 
 def page_admin_accounts():
@@ -1271,13 +1591,11 @@ def page_admin_accounts():
         """, conn)
     tab_mgr, tab_reset = st.tabs(["👤 帳號管理（新增 / 移除）","🔒 重設密碼"])
 
-    # ── Tab 1：新增 + 移除帳號 ───────────────────────────────
     with tab_mgr:
         st.markdown('<div class="section-title">👥 使用者清單</div>', unsafe_allow_html=True)
         st.dataframe(users[["帳號","角色","姓名","Email"]], use_container_width=True, height=260)
         st.divider()
 
-        # 新增
         st.markdown('<div class="section-title">➕ 新增帳號</div>', unsafe_allow_html=True)
         with st.form("add_user_form"):
             c1,c2 = st.columns(2)
@@ -1286,8 +1604,9 @@ def page_admin_accounts():
                 new_password = st.text_input("密碼", type="password",
                                              help="最少 6 碼且需包含英文字母")
             with c2:
-                new_role  = st.selectbox("角色", ["student","coach","admin"],
-                                         format_func=lambda x: {"student":"學員","coach":"教練","admin":"管理者"}[x])
+                new_role  = st.selectbox(
+                    "角色", ["student","coach","admin"],
+                    format_func=lambda x: {"student":"學員","coach":"教練","admin":"管理者"}[x])
                 new_name  = st.text_input("姓名（顯示名稱）")
                 new_email = st.text_input("Email（選填）")
             add_sub = st.form_submit_button("✅ 建立帳號", type="primary")
@@ -1302,16 +1621,20 @@ def page_admin_accounts():
                     try:
                         with get_conn() as conn:
                             cur = conn.execute(
-                                "INSERT INTO Users(username,password,role,email,display_name) VALUES(?,?,?,?,?)",
-                                (new_username, hash_pw(new_password), new_role, new_email, new_name))
+                                "INSERT INTO Users(username,password,role,email,display_name)"
+                                " VALUES(?,?,?,?,?)",
+                                (new_username, hash_pw(new_password),
+                                 new_role, new_email, new_name))
                             conn.commit()
                             uid = cur.lastrowid
                             if new_role == "student":
-                                conn.execute("INSERT INTO Students(user_id,name,email) VALUES(?,?,?)",
-                                             (uid, new_name, new_email))
+                                conn.execute(
+                                    "INSERT INTO Students(user_id,name,email) VALUES(?,?,?)",
+                                    (uid, new_name, new_email))
                             elif new_role == "coach":
-                                conn.execute("INSERT INTO Coaches(user_id,name) VALUES(?,?)",
-                                             (uid, new_name))
+                                conn.execute(
+                                    "INSERT INTO Coaches(user_id,name) VALUES(?,?)",
+                                    (uid, new_name))
                             conn.commit()
                         st.success(f"✅ 帳號 '{new_username}' 建立成功！")
                         st.rerun()
@@ -1321,7 +1644,6 @@ def page_admin_accounts():
                         st.error(f"建立失敗：{e}")
 
         st.divider()
-        # 移除
         st.markdown('<div class="section-title">🗑️ 移除帳號</div>', unsafe_allow_html=True)
         current_uid = st.session_state.get("user_id")
         admin_count = (users["role"] == "admin").sum()
@@ -1339,29 +1661,31 @@ def page_admin_accounts():
             remove_uid = remove_options[sel_remove]
             remove_row = users[users["id"] == remove_uid].iloc[0]
 
-            # 關聯資料提示
             with get_conn() as conn:
                 if remove_row["role"] == "student":
                     sid_r = conn.execute("SELECT id FROM Students WHERE user_id=?",
                                          (remove_uid,)).fetchone()
                     if sid_r:
-                        enroll_cnt = conn.execute("SELECT COUNT(*) FROM Enrollments WHERE student_id=?",
-                                                  (sid_r["id"],)).fetchone()[0]
-                        attend_cnt = conn.execute("SELECT COUNT(*) FROM Attendance WHERE student_id=?",
-                                                  (sid_r["id"],)).fetchone()[0]
+                        enroll_cnt = conn.execute(
+                            "SELECT COUNT(*) FROM Enrollments WHERE student_id=?",
+                            (sid_r["id"],)).fetchone()[0]
+                        attend_cnt = conn.execute(
+                            "SELECT COUNT(*) FROM Attendance WHERE student_id=?",
+                            (sid_r["id"],)).fetchone()[0]
                         unpaid_cnt = conn.execute(
                             "SELECT COUNT(*) FROM Payments WHERE student_id=? AND is_paid=0",
                             (sid_r["id"],)).fetchone()[0]
                         st.info(
                             f"此學員關聯資料：報名課程 {enroll_cnt} 筆、"
                             f"出勤紀錄 {attend_cnt} 筆、未繳費 {unpaid_cnt} 筆。\n\n"
-                            "⚠️ 刪除後對應資料需另行處理（報名/出勤/繳費不會自動刪除）。")
+                            "⚠️ 刪除後對應資料需另行處理。")
                 elif remove_row["role"] == "coach":
                     cid_r = conn.execute("SELECT id FROM Coaches WHERE user_id=?",
                                           (remove_uid,)).fetchone()
                     if cid_r:
-                        course_cnt = conn.execute("SELECT COUNT(*) FROM Courses WHERE coach_id=?",
-                                                  (cid_r["id"],)).fetchone()[0]
+                        course_cnt = conn.execute(
+                            "SELECT COUNT(*) FROM Courses WHERE coach_id=?",
+                            (cid_r["id"],)).fetchone()[0]
                         if course_cnt > 0:
                             st.warning(
                                 f"⚠️ 此教練仍負責 **{course_cnt}** 筆課程，"
@@ -1393,7 +1717,6 @@ def page_admin_accounts():
                     except Exception as e:
                         st.error(f"移除失敗：{e}")
 
-    # ── Tab 2：重設密碼 ──────────────────────────────────────
     with tab_reset:
         user_options = dict(zip(users["帳號"], users["id"]))
         with st.form("reset_pw_form"):
@@ -1436,8 +1759,9 @@ def page_weekly_schedule():
     sel_date     = dates_list[labels.index(sel_label)]
     sel_weekday  = ["週一","週二","週三","週四","週五","週六","週日"][sel_date.weekday()]
 
-    st.markdown(f"<small style='color:#888;'>查詢日期：{sel_date.isoformat()}（{sel_weekday}）</small>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f"<small style='color:#888;'>查詢日期：{sel_date.isoformat()}（{sel_weekday}）</small>",
+        unsafe_allow_html=True)
     st.divider()
 
     with get_conn() as conn:
@@ -1452,7 +1776,8 @@ def page_weekly_schedule():
         """, conn, params=(sel_weekday,))
         if role == "coach":
             my_ids = set(pd.read_sql_query(
-                "SELECT id FROM Courses WHERE coach_id=?", conn, params=(pid,))["id"].tolist())
+                "SELECT id FROM Courses WHERE coach_id=?",
+                conn, params=(pid,))["id"].tolist())
         elif role == "student":
             my_ids = set(pd.read_sql_query(
                 "SELECT course_id FROM Enrollments WHERE student_id=?",
@@ -1477,8 +1802,7 @@ def page_weekly_schedule():
             f"課程類型：{c['course_type']}<br>教練：{c['coach_name']}<br>"
             f"時段：{c['schedule_time']}～{em//60:02d}:{em%60:02d}<br>"
             f"報名人數：{c['enrolled_count']}<br>"
-            if is_mine else
-            f"<b>桌{c['table_id']}</b><br>已佔用<br>"
+            if is_mine else f"<b>桌{c['table_id']}</b><br>已佔用<br>"
         )
         fig.add_trace(go.Bar(
             x=[dur_h], y=[f"桌{c['table_id']}"], base=[sm / 60],
