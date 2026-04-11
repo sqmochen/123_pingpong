@@ -234,9 +234,8 @@ def init_db():
         stu_users = cur.execute("SELECT id FROM Users WHERE role='student' ORDER BY id").fetchall()
         if len(stu_users) >= 3:
             for uid, name, phone, email in [
-                (stu_users[0]["id"], "陳小明", "0933-111-222", "ming@example.com"),
-                (stu_users[1]["id"], "林小華", "0944-222-333", "hua@example.com"),
-                (stu_users[2]["id"], "張小英", "0955-333-444", "ying@example.com"),
+                (stu_users[0]["id"], "範例", "1111-111-111", "Test@example.com"),
+
             ]:
                 cur.execute(
                     "INSERT OR IGNORE INTO Students(user_id,name,phone,email) VALUES(?,?,?,?)",
@@ -245,10 +244,8 @@ def init_db():
         coaches = cur.execute("SELECT id FROM Coaches ORDER BY id").fetchall()
         if coaches:
             for c_type, cidx, day, stime, dur, tbl in [
-                ("團體班", 0, "週一", "14:00",  90, 1),
-                ("個人班", 0, "週三", "10:00",  60, 2),
-                ("團體班", 1, "週二", "16:00",  90, 3),
-                ("暑假班", 1, "週五", "09:00", 120, 4),
+                ("個人班", 0, "週一", "07:00",  60, 2),
+
             ]:
                 code = make_course_code(day, tbl, stime, dur)
                 if not cur.execute("SELECT id FROM Courses WHERE course_code=?", (code,)).fetchone():
