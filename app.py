@@ -580,7 +580,17 @@ def page_coach_attendance():
                 """,(sess_id,sid,rev[sl]))
             conn.commit()
         p=sum(1 for v in sels.values() if v=="出席"); a=sum(1 for v in sels.values() if v=="缺席")
-        st.success(f"✅ 點名完成！出席：{p} 人，缺席：{a} 人")
+        lv=sum(1 for v in sels.values() if v=="請假")
+        # ✅ 點名完成：顯示通知後自動返回主畫面
+        st.session_state["att_done_msg"] = (
+            f"✅ 點名完成！課程：{sel}　日期：{sess_date.isoformat()}　"
+            f"出席：{p} 人　缺席：{a} 人　請假：{lv} 人"
+        )
+        st.rerun()
+
+    # 顯示上一次點名完成通知（rerun 後在頁面頂部顯示）
+    if "att_done_msg" in st.session_state:
+        st.success(st.session_state.pop("att_done_msg"))
 
 
 def page_coach_leave_review():
@@ -856,6 +866,64 @@ def page_admin_courses():
                         except Exception as e: st.error(f"報名失敗：{e}")
                 else: st.info("所有學員皆已報名此課程。")
 
+            # ── 新功能：人工輸入課程堂數 + 推估預計上課日期 ────────────────
+            st.divider()
+            st.markdown('<div class="section-title">📅 預計上課日期推估</div>',unsafe_allow_html=True)
+            st.caption("依課程排定星期，從指定起始日往後推算預計上課日期。")
+
+            # 取得所選課程的上課星期
+            with get_conn() as conn:
+                crs_info = conn.execute(
+                    "SELECT schedule_day, schedule_time FROM Courses WHERE id=?", (cid_e,)
+                ).fetchone()
+
+            if crs_info:
+                wd_label = str(crs_info["schedule_day"])
+                wd_time  = str(crs_info["schedule_time"])
+                target_wd = WD.get(wd_label, 0)  # 0=週一
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    total_lessons = st.number_input(
+                        "課程總堂數",
+                        min_value=1, max_value=200, value=12, step=1,
+                        key="est_lessons",
+                        help="輸入這堂課共有幾堂，系統將自動推算每堂預計日期"
+                    )
+                with col_b:
+                    start_from = st.date_input(
+                        "起始日期（從哪天開始算）",
+                        value=date.today(),
+                        key="est_start",
+                        help="通常填報名日或第一堂課日期"
+                    )
+
+                if st.button("🔍 推算預計上課日期", key="calc_schedule"):
+                    # 計算從 start_from 起，找到 total_lessons 個對應星期的日期
+                    result_dates = []
+                    cursor_date = start_from
+                    while len(result_dates) < total_lessons:
+                        if cursor_date.weekday() == target_wd:
+                            result_dates.append(cursor_date)
+                        cursor_date += timedelta(days=1)
+
+                    # 組成 DataFrame 顯示
+                    df_sched = pd.DataFrame({
+                        "堂次": range(1, len(result_dates)+1),
+                        "預計上課日期": [d.strftime("%Y-%m-%d") for d in result_dates],
+                        "星期": [["一","二","三","四","五","六","日"][d.weekday()] for d in result_dates],
+                        "上課時間": wd_time,
+                    })
+                    st.dataframe(df_sched, use_container_width=True, height=300)
+                    st.caption(f"共 {total_lessons} 堂，課程星期：{wd_label}，每週上課時間：{wd_time}")
+                    # 儲存推算結果供下載
+                    st.download_button(
+                        "⬇️ 下載預計上課日期表",
+                        data=df_sched.to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"預計上課日期_{cid_e}_{start_from}.csv",
+                        mime="text/csv"
+                    )
+
     # ── Tab 4：桌次視覺化甘特圖 ────────────────────────────
     with t4:
         st.markdown('<div class="section-title">🏓 選定星期的桌次甘特圖</div>',unsafe_allow_html=True)
@@ -963,7 +1031,9 @@ def page_admin_payments():
     disp=df.copy()
     disp["狀態"]=disp["is_paid"].apply(lambda x:"✅ 已繳" if x else "❌ 未繳")
     disp["繳交費用"]=disp["繳交費用"].apply(lambda x:f"NT$ {x:,.0f}")
-    st.dataframe(disp.drop(columns=["id","is_paid"]),use_container_width=True,height=360)
+    st.dataframe(disp.drop(columns=["id","is_paid"]),use_container_width=True,height=300)
+
+    # ── 標記繳費（未繳費項目）───────────────────────────────────
     unpaid=df[df["is_paid"]==0]
     if not unpaid.empty:
         st.divider()
@@ -978,6 +1048,79 @@ def page_admin_payments():
                         conn.execute("UPDATE Payments SET is_paid=1,paid_date=?,paid_time=? WHERE id=?",
                                      (pd_.isoformat(),pt_.strftime("%H:%M"),int(row["id"]))); conn.commit()
                     st.success("✅ 繳費狀態已更新！"); st.rerun()
+
+    # ── 新功能：修改繳費金額與期別 ──────────────────────────────
+    st.divider()
+    st.markdown('<div class="section-title">✏️ 修改繳費紀錄</div>',unsafe_allow_html=True)
+    st.caption("可修改應繳金額與期別，修改後同步更新 Enrollments.fee。")
+    # 重新讀取完整清單（不受篩選影響）供修改/移除
+    with get_conn() as conn:
+        df_all = pd.read_sql_query("""
+            SELECT p.id, s.name AS 學員, c.course_type AS 課程類別,
+                   c.schedule_day||' '||c.schedule_time AS 上課時間,
+                   p.amount AS 繳交費用, p.period AS 期別,
+                   p.student_id, p.course_id, p.is_paid
+            FROM Payments p
+            JOIN Students s  ON p.student_id=s.id
+            JOIN Courses  c  ON p.course_id=c.id
+            ORDER BY p.is_paid ASC, s.name
+        """, conn)
+    if not df_all.empty:
+        edit_opts = {
+            f"{r['學員']} ｜ {r['課程類別']} {r['上課時間']} ｜ {r['期別']} ｜ NT${r['繳交費用']:,.0f} ({'已繳' if r['is_paid'] else '未繳'})": int(r["id"])
+            for _, r in df_all.iterrows()
+        }
+        e_sel = st.selectbox("選擇要修改的繳費紀錄", list(edit_opts.keys()), key="edit_pay_sel")
+        e_pid = edit_opts[e_sel]
+        e_row = df_all[df_all["id"]==e_pid].iloc[0]
+        col_ea, col_eb = st.columns(2)
+        new_amount = col_ea.number_input(
+            "新金額（元）", min_value=0, value=int(e_row["繳交費用"]), step=100, key="edit_pay_amt"
+        )
+        new_period = col_eb.text_input(
+            "期別（YYYY-MM）", value=str(e_row["期別"]), key="edit_pay_period", help="格式：2026-04"
+        )
+        if st.button("💾 儲存修改", key="do_edit_pay", type="primary"):
+            import re as _re
+            if not _re.match(r"^\d{4}-\d{2}$", new_period.strip()):
+                st.error("期別格式錯誤，請輸入 YYYY-MM，例：2026-04")
+            else:
+                try:
+                    with get_conn() as conn:
+                        # 更新 Payments.amount 與 period
+                        conn.execute(
+                            "UPDATE Payments SET amount=?, period=? WHERE id=?",
+                            (new_amount, new_period.strip(), e_pid))
+                        # 同步更新 Enrollments.fee（同學員同課程）
+                        conn.execute(
+                            "UPDATE Enrollments SET fee=? WHERE student_id=? AND course_id=?",
+                            (new_amount, int(e_row["student_id"]), int(e_row["course_id"])))
+                        conn.commit()
+                    st.success(f"✅ 已更新：金額 NT$ {new_amount:,}，期別 {new_period.strip()}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"修改失敗：{e}")
+
+    # ── 新功能：移除繳費紀錄 ─────────────────────────────────────
+    st.divider()
+    st.markdown('<div class="section-title">🗑️ 移除繳費紀錄</div>',unsafe_allow_html=True)
+    st.caption("⚠️ 移除後無法復原，請謹慎操作。僅移除繳費單，不影響報名紀錄。")
+    if not df_all.empty:
+        del_opts = {
+            f"{r['學員']} ｜ {r['課程類別']} {r['上課時間']} ｜ {r['期別']} ｜ NT${r['繳交費用']:,.0f}": int(r["id"])
+            for _, r in df_all.iterrows()
+        }
+        d_sel = st.selectbox("選擇要移除的繳費紀錄", list(del_opts.keys()), key="del_pay_sel")
+        d_pid = del_opts[d_sel]
+        d_conf = st.checkbox("確認移除此繳費紀錄（此操作不可復原）", key="del_pay_conf")
+        if st.button("🗑️ 執行移除", key="do_del_pay", type="primary", disabled=not d_conf):
+            try:
+                with get_conn() as conn:
+                    conn.execute("DELETE FROM Payments WHERE id=?", (d_pid,))
+                    conn.commit()
+                st.success("✅ 繳費紀錄已移除。"); st.rerun()
+            except Exception as e:
+                st.error(f"移除失敗：{e}")
 
 
 def page_admin_reports():
@@ -1114,7 +1257,7 @@ def page_admin_reports():
                 st.download_button("⬇️ 匯出 CSV",df4[sc4].to_csv(index=False).encode("utf-8-sig"),
                                    file_name=f"教練上課查詢_{selc}_{sd}_{ed}.csv",mime="text/csv")
 
-    # Tab 5：學員上課與繳費查詢（v1.5 新增）
+    # Tab 5：學員上課與繳費查詢（v1.5 新增，v1.6 強化）
     with t5:
         st.markdown('<div class="section-title">🎓 學員上課與繳費查詢</div>',unsafe_allow_html=True)
         with get_conn() as conn:
@@ -1125,7 +1268,7 @@ def page_admin_reports():
             sidmap=dict(zip(sl["name"],sl["id"]))
             sels=st.selectbox("選擇學員",sopts,key="t5_s")
             is_all_s=(sels=="全部學員")
-            # 出勤查詢
+            # 出勤查詢（受日期區間限制）
             qa="""
                 SELECT cs.session_date AS 上課日期,
                        COALESCE(c.course_code,'—') AS 課程ID,
@@ -1144,6 +1287,24 @@ def page_admin_reports():
             pa=[sd.isoformat(),ed.isoformat()]
             if not is_all_s: qa+=" AND a.student_id=?"; pa.append(sidmap[sels])
             qa+=" ORDER BY cs.session_date DESC, s.name"
+
+            # 歷史出勤查詢（不受日期限制，用於累計統計）
+            qa_all="""
+                SELECT cs.session_date AS 上課日期,
+                       COALESCE(c.course_code,'—') AS 課程ID,
+                       c.course_type AS 課程類型, co.name AS 教練,
+                       cs.session_time AS 上課時間, s.name AS 學員,
+                       a.status AS _st
+                FROM Attendance a
+                JOIN ClassSessions cs ON a.session_id=cs.id
+                JOIN Courses  c  ON cs.course_id=c.id
+                JOIN Coaches  co ON cs.coach_id=co.id
+                JOIN Students s  ON a.student_id=s.id
+            """
+            pa_all=[]
+            if not is_all_s: qa_all+=" WHERE a.student_id=?"; pa_all.append(sidmap[sels])
+            qa_all+=" ORDER BY cs.session_date DESC, s.name"
+
             # 繳費查詢（不受日期限制）
             qp="""
                 SELECT p.period AS 期別, COALESCE(c.course_code,'—') AS 課程ID,
@@ -1159,30 +1320,73 @@ def page_admin_reports():
             pp=[]
             if not is_all_s: qp+=" WHERE p.student_id=?"; pp.append(sidmap[sels])
             qp+=" ORDER BY p.period DESC, s.name"
+
+            # 報名課程資訊（用於推算預計上課日期）
+            q_enr="""
+                SELECT e.student_id, s.name AS 學員, c.id AS course_id,
+                       COALESCE(c.course_code,'—') AS 課程ID,
+                       c.course_type AS 課程類型, c.schedule_day AS 星期,
+                       c.schedule_time AS 上課時間, e.enrolled_date AS 報名日期
+                FROM Enrollments e
+                JOIN Courses c ON e.course_id=c.id
+                JOIN Students s ON e.student_id=s.id
+            """
+            pe=[]
+            if not is_all_s: q_enr+=" WHERE e.student_id=?"; pe.append(sidmap[sels])
+            q_enr+=" ORDER BY s.name, c.schedule_day"
+
             with get_conn() as conn:
                 dfa=pd.read_sql_query(qa,conn,params=pa)
+                dfa_all=pd.read_sql_query(qa_all,conn,params=pa_all)
                 dfp=pd.read_sql_query(qp,conn,params=pp)
+                df_enr=pd.read_sql_query(q_enr,conn,params=pe)
                 ecnt=conn.execute("SELECT COUNT(*) FROM Enrollments"+(
                     " WHERE student_id=?" if not is_all_s else ""),
                     ([sidmap[sels]] if not is_all_s else [])).fetchone()[0]
 
+            # 累計出席次數（不受日期限制）
+            total_present_all = (dfa_all["_st"]=="present").sum() if not dfa_all.empty else 0
             pre5=(dfa["_st"]=="present").sum() if not dfa.empty else 0
             tot5=len(dfa); ar5=pre5/tot5*100 if tot5 else 0
             pt5=dfp[dfp["is_paid"]==1]["應繳金額"].sum() if not dfp.empty else 0
             ut5=dfp[dfp["is_paid"]==0]["應繳金額"].sum() if not dfp.empty else 0
-            c1,c2,c3,c4,c5=st.columns(5)
-            c1.metric("報名課程數",ecnt); c2.metric("出席次數",pre5)
-            c3.metric("出席率",f"{ar5:.1f}%"); c4.metric("已繳費總額",f"NT$ {pt5:,.0f}")
-            c5.metric("未繳費總額",f"NT$ {ut5:,.0f}")
+
+            # 統計指標（6 欄）
+            c1,c2,c3,c4,c5,c6=st.columns(6)
+            c1.metric("報名課程數",ecnt)
+            c2.metric("累計上課次數",total_present_all)  # 新增：累計出席次數（不受日期限制）
+            c3.metric("區間出席次數",pre5)
+            c4.metric("出席率",f"{ar5:.1f}%")
+            c5.metric("已繳費總額",f"NT$ {pt5:,.0f}")
+            c6.metric("未繳費總額",f"NT$ {ut5:,.0f}")
             st.divider()
 
-            st.markdown('<div class="section-title">① 出勤紀錄</div>',unsafe_allow_html=True)
+            # ── ① 歷史上課紀錄（全部，不受日期限制）──────────────
+            st.markdown('<div class="section-title">① 歷史上課紀錄（全部）</div>',unsafe_allow_html=True)
+            st.caption("顯示所有已點名的上課紀錄，不受上方日期區間限制。")
+            if dfa_all.empty: st.info("目前無任何上課紀錄。")
+            else:
+                dfa_all_disp = dfa_all.copy()
+                dfa_all_disp["出勤狀態"] = dfa_all_disp["_st"].map(
+                    {"present":"✅ 出席","absent":"❌ 缺席","leave":"🟡 請假"})
+                ac_all=["上課日期","課程ID","課程類型","教練","上課時間","出勤狀態"]
+                if is_all_s: ac_all.insert(2,"學員")
+                st.dataframe(dfa_all_disp[ac_all],use_container_width=True,height=260)
+                st.download_button(
+                    "⬇️ 匯出歷史上課紀錄 CSV",
+                    dfa_all_disp[ac_all].to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"歷史上課紀錄_{sels}.csv", mime="text/csv"
+                )
+
+            # ── ② 出勤紀錄（日期區間內）────────────────────────────
+            st.divider()
+            st.markdown('<div class="section-title">② 區間出勤紀錄</div>',unsafe_allow_html=True)
             if dfa.empty: st.info("此區間無出勤紀錄。")
             else:
                 ac=["上課日期","課程ID","課程類型","教練","上課時間","出勤狀態"]
                 if is_all_s: ac.insert(2,"學員")
-                st.dataframe(dfa[ac],use_container_width=True,height=260)
-                st.download_button("⬇️ 匯出出勤 CSV",dfa[ac].to_csv(index=False).encode("utf-8-sig"),
+                st.dataframe(dfa[ac],use_container_width=True,height=220)
+                st.download_button("⬇️ 匯出區間出勤 CSV",dfa[ac].to_csv(index=False).encode("utf-8-sig"),
                                    file_name=f"學員出勤查詢_{sels}_{sd}_{ed}.csv",mime="text/csv")
                 # 近 6 個月出勤長條圖
                 with get_conn() as conn:
@@ -1202,9 +1406,81 @@ def page_admin_reports():
                         fig5.add_trace(go.Bar(name=lm5.get(col,col),x=pv5.index,y=pv5[col],marker_color=cm5.get(col,"#999")))
                     fig5.update_layout(barmode="group",height=260,margin=dict(l=0,r=0,t=10,b=0),legend=dict(orientation="h"))
                     st.plotly_chart(fig5,use_container_width=True)
-            st.divider()
 
-            st.markdown('<div class="section-title">② 繳費紀錄（全期別）</div>',unsafe_allow_html=True)
+            # ── ③ 預計上課日期 ──────────────────────────────────────
+            st.divider()
+            st.markdown('<div class="section-title">③ 預計上課日期</div>',unsafe_allow_html=True)
+            st.caption("依課程排定星期，從報名日起推算未來上課日期。預計上課日期 < 3 堂時顯示繳費通知。")
+
+            if df_enr.empty:
+                st.info("目前無報名課程。")
+            else:
+                # 每個課程分別計算預計日期
+                sched_rows = []
+                notice_rows = []  # 需要繳費通知的項目
+
+                for _, enr in df_enr.iterrows():
+                    target_wd = WD.get(str(enr["星期"]), 0)
+                    # 計算該學員在此課程的歷史出勤次數（累計出席）
+                    with get_conn() as conn:
+                        done_cnt = conn.execute("""
+                            SELECT COUNT(*) FROM Attendance a
+                            JOIN ClassSessions cs ON a.session_id=cs.id
+                            WHERE cs.course_id=? AND a.student_id=? AND a.status='present'
+                        """, (int(enr["course_id"]),
+                              (sidmap[sels] if not is_all_s else int(enr["student_id"])))).fetchone()[0]
+
+                    # 從今天起推算未來 10 堂預計日期
+                    future_dates = []
+                    cursor = date.today()
+                    while len(future_dates) < 10:
+                        if cursor.weekday() == target_wd:
+                            future_dates.append(cursor)
+                        cursor += timedelta(days=1)
+
+                    # 繳費通知判斷：預計上課日期 < 3 堂
+                    notice = "🔔 繳費通知" if len(future_dates) < 3 else ""
+
+                    for i, fd in enumerate(future_dates):
+                        row_data = {
+                            "學員": enr["學員"],
+                            "課程ID": enr["課程ID"],
+                            "課程類型": enr["課程類型"],
+                            "星期": enr["星期"],
+                            "上課時間": enr["上課時間"],
+                            "第幾堂": done_cnt + i + 1,
+                            "預計上課日期": fd.strftime("%Y-%m-%d"),
+                            "備註": notice if i == 0 else "",  # 只在第一行顯示通知
+                        }
+                        sched_rows.append(row_data)
+                        if notice and i == 0:
+                            notice_rows.append(row_data)
+
+                if sched_rows:
+                    df_sched = pd.DataFrame(sched_rows)
+                    show_cols = ["預計上課日期","課程ID","課程類型","星期","上課時間","第幾堂","備註"]
+                    if is_all_s: show_cols.insert(0, "學員")
+
+                    # 繳費通知警示（預計日期 < 3 堂的項目）
+                    if notice_rows:
+                        notice_df = pd.DataFrame(notice_rows)
+                        affected = notice_df["課程ID"].tolist()
+                        st.warning(
+                            f"🔔 **繳費通知**：以下課程預計上課堂數不足 3 堂，請提醒學員續費：\n\n" +
+                            "\n".join([f"- {r['學員']} ｜ {r['課程ID']} {r['課程類型']} {r['星期']} {r['上課時間']}"
+                                       for r in notice_rows])
+                        )
+
+                    st.dataframe(df_sched[show_cols],use_container_width=True,height=300)
+                    st.download_button(
+                        "⬇️ 匯出預計上課日期 CSV",
+                        df_sched[show_cols].to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"預計上課日期_{sels}.csv", mime="text/csv"
+                    )
+
+            # ── ④ 繳費紀錄（全期別）────────────────────────────────
+            st.divider()
+            st.markdown('<div class="section-title">④ 繳費紀錄（全期別）</div>',unsafe_allow_html=True)
             if dfp.empty: st.info("目前無繳費紀錄。")
             else:
                 dpd=dfp.copy()
@@ -1215,6 +1491,7 @@ def page_admin_reports():
                 st.dataframe(dpd[pc],use_container_width=True,height=260)
                 st.download_button("⬇️ 匯出繳費 CSV",dpd[pc].to_csv(index=False).encode("utf-8-sig"),
                                    file_name=f"學員繳費查詢_{sels}.csv",mime="text/csv")
+
 
 
 def page_admin_accounts():
@@ -1235,6 +1512,55 @@ def page_admin_accounts():
     with ta:
         st.markdown('<div class="section-title">👥 使用者清單</div>',unsafe_allow_html=True)
         st.dataframe(users[["帳號","角色","姓名","Email"]],use_container_width=True,height=240)
+
+        # ── 新功能：修改使用者資料 ──────────────────────────────────
+        st.divider()
+        st.markdown('<div class="section-title">✏️ 修改使用者資料</div>',unsafe_allow_html=True)
+        edit_u_opts = {f"{r['帳號']}（{r['角色']} / {r['姓名']}）": r["id"]
+                       for _, r in users.iterrows()}
+        eu_sel = st.selectbox("選擇要修改的帳號", list(edit_u_opts.keys()), key="edit_u_sel")
+        eu_id  = edit_u_opts[eu_sel]
+        eu_row = users[users["id"]==eu_id].iloc[0]
+
+        with st.form("edit_user_form"):
+            eu_c1, eu_c2 = st.columns(2)
+            with eu_c1:
+                eu_name  = st.text_input("姓名",  value=str(eu_row["姓名"]))
+                eu_email = st.text_input("Email", value=str(eu_row["Email"]))
+            with eu_c2:
+                # 管理者顯示 display_name 說明
+                if eu_row["role"] == "admin":
+                    st.caption("管理者：姓名存入 Users.display_name")
+                elif eu_row["role"] == "student":
+                    st.caption("學員：姓名同步更新 Students.name")
+                elif eu_row["role"] == "coach":
+                    st.caption("教練：姓名同步更新 Coaches.name")
+            eu_sub = st.form_submit_button("💾 儲存修改", type="primary")
+
+        if eu_sub:
+            if not eu_name.strip():
+                st.error("姓名不可為空。")
+            else:
+                try:
+                    with get_conn() as conn:
+                        # 更新 Users 的 email 和 display_name（管理者）
+                        conn.execute(
+                            "UPDATE Users SET email=?, display_name=? WHERE id=?",
+                            (eu_email.strip(), eu_name.strip(), eu_id))
+                        # 依角色同步更新對應資料表的 name 欄位
+                        if eu_row["role"] == "student":
+                            conn.execute(
+                                "UPDATE Students SET name=?, email=? WHERE user_id=?",
+                                (eu_name.strip(), eu_email.strip(), eu_id))
+                        elif eu_row["role"] == "coach":
+                            conn.execute(
+                                "UPDATE Coaches SET name=? WHERE user_id=?",
+                                (eu_name.strip(), eu_id))
+                        conn.commit()
+                    st.success(f"✅ 帳號 '{eu_row['帳號']}' 資料已更新！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"修改失敗：{e}")
         st.divider()
         st.markdown('<div class="section-title">➕ 新增帳號</div>',unsafe_allow_html=True)
         with st.form("add_user"):
