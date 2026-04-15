@@ -1,6 +1,6 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.8  |  Tab5 重構：上課規劃與執行表 + 備註儲存
+# 規格版本：v1.9  |  Tab3 報名新增總堂數/開始日期/累加繳費
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
@@ -125,6 +125,8 @@ def init_db():
             course_id     INTEGER NOT NULL,
             fee           REAL NOT NULL DEFAULT 0,
             enrolled_date TEXT NOT NULL,
+            total_lessons INTEGER DEFAULT NULL,   -- v1.9：本次報名總堂數
+            start_date    TEXT DEFAULT NULL,      -- v1.9：開始上課日期（YYYY-MM-DD）
             UNIQUE(student_id, course_id),
             FOREIGN KEY(student_id) REFERENCES Users(id),
             FOREIGN KEY(course_id)  REFERENCES Courses(id));
@@ -196,6 +198,9 @@ def init_db():
             "ALTER TABLE ClassSessions ADD COLUMN created_by TEXT NOT NULL DEFAULT 'system'",
             "ALTER TABLE Payments ADD COLUMN paid_time TEXT",
             "ALTER TABLE Payments ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+            # v1.9：Enrollments 新增總堂數與開始日期
+            "ALTER TABLE Enrollments   ADD COLUMN total_lessons INTEGER DEFAULT NULL",
+            "ALTER TABLE Enrollments   ADD COLUMN start_date    TEXT DEFAULT NULL",
         ]:
             try: cur.execute(sql)
             except: pass
@@ -258,7 +263,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.8</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.9</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -811,7 +816,9 @@ def page_admin_courses():
             cid_e=cmap2[sel_c]
             with get_conn() as conn:
                 enrolled=pd.read_sql_query("""
-                    SELECT u.id, u.name, e.fee AS 費用_元
+                    SELECT u.id, u.name, e.fee AS 費用_元,
+                           COALESCE(e.total_lessons,'—') AS 總堂數,
+                           COALESCE(e.start_date,'—') AS 開始日期
                     FROM Enrollments e JOIN Users u ON e.student_id=u.id
                     WHERE e.course_id=? ORDER BY u.name
                 """,conn,params=(cid_e,))
@@ -823,9 +830,12 @@ def page_admin_courses():
                 if enrolled.empty: st.info("此課程尚無學員報名。")
                 else:
                     for _,er in enrolled.iterrows():
-                        r1,r2,r3=st.columns([3,2,1])
-                        r1.write(er["name"]); r2.write(f"NT$ {er['費用_元']:,.0f}")
-                        if r3.button("移除",key=f"rm_{er['id']}_{cid_e}"):
+                        r1,r2,r3,r4,r5=st.columns([3,2,2,2,1])
+                        r1.write(er["name"])
+                        r2.write(f"NT$ {er['費用_元']:,.0f}")
+                        r3.write(f"{er['總堂數']} 堂" if er['總堂數']!='—' else '—')
+                        r4.write(str(er['開始日期']))
+                        if r5.button("移除",key=f"rm_{er['id']}_{cid_e}"):
                             with get_conn() as conn:
                                 sess=conn.execute("SELECT id FROM ClassSessions WHERE course_id=?",(cid_e,)).fetchall()
                                 for s in sess:
@@ -838,37 +848,72 @@ def page_admin_courses():
             with cb:
                 st.markdown("**新增學員報名**")
                 if notenr:
-                    add_s=st.selectbox("選擇學員",notenr,key="add_s")
-                    add_f=st.number_input("費用（元）",min_value=0,value=2000,step=100,key="add_f")
-                    if st.button("➕ 加入報名",type="primary"):
+                    add_s  = st.selectbox("選擇學員", notenr, key="add_s")
+                    add_f  = st.number_input("費用（元）整期總費用",
+                                             min_value=0, value=2000, step=100, key="add_f")
+                    add_l  = st.number_input("課程總堂數",
+                                             min_value=1, max_value=500, value=12, step=1, key="add_l",
+                                             help="本次報名的總堂數，存入報名紀錄供日後查詢")
+                    add_sd = st.date_input("開始上課日期", value=date.today(), key="add_sd",
+                                           help="報名起算日，用於推算預計上課日期")
+                    if st.button("➕ 加入報名", type="primary"):
                         try:
-                            now=datetime.now().isoformat(); per=date.today().strftime("%Y-%m")
+                            now = datetime.now().isoformat()
+                            per = date.today().strftime("%Y-%m")
+                            sid_add = smap[add_s]
                             with get_conn() as conn:
+                                # 判斷是否已有 Enrollments 紀錄（後續累加報名）
+                                existing = conn.execute(
+                                    "SELECT id FROM Enrollments WHERE student_id=? AND course_id=?",
+                                    (sid_add, cid_e)).fetchone()
+                                if existing:
+                                    # 後續報名：更新 fee、total_lessons、start_date
+                                    conn.execute(
+                                        "UPDATE Enrollments SET fee=?, total_lessons=?, start_date=? "
+                                        "WHERE student_id=? AND course_id=?",
+                                        (add_f, add_l, add_sd.isoformat(), sid_add, cid_e))
+                                else:
+                                    # 第一次報名：新增 Enrollments
+                                    conn.execute(
+                                        "INSERT INTO Enrollments"
+                                        "(student_id,course_id,fee,enrolled_date,total_lessons,start_date)"
+                                        " VALUES(?,?,?,?,?,?)",
+                                        (sid_add, cid_e, add_f,
+                                         date.today().isoformat(), add_l, add_sd.isoformat()))
+                                # 每次報名都新增一筆 Payments（以 created_at 區分先後）
                                 conn.execute(
-                                    "INSERT INTO Enrollments(student_id,course_id,fee,enrolled_date) VALUES(?,?,?,?)",
-                                    (smap[add_s],cid_e,add_f,date.today().isoformat()))
-                                conn.execute(
-                                    "INSERT INTO Payments(student_id,course_id,amount,period,created_at) VALUES(?,?,?,?,?)",
-                                    (smap[add_s],cid_e,add_f,per,now))
+                                    "INSERT INTO Payments"
+                                    "(student_id,course_id,amount,period,created_at)"
+                                    " VALUES(?,?,?,?,?)",
+                                    (sid_add, cid_e, add_f, per, now))
                                 conn.commit()
-                            st.success(f"✅ {add_s} 已加入課程，費用 NT$ {add_f:,}！"); st.rerun()
-                        except Exception as e: st.error(f"報名失敗：{e}")
-                else: st.info("所有學員皆已報名此課程。")
+                            st.success(
+                                f"✅ {add_s} 報名成功！"
+                                f"費用 NT$ {add_f:,}，共 {add_l} 堂，"
+                                f"開始日：{add_sd.isoformat()}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"報名失敗：{e}")
+                else:
+                    st.info("所有學員皆已報名此課程。")
 
-            # 預計上課日期推估
+            # ── 預計上課日期推估（獨立操作，與報名欄位分開）────────────
             st.divider()
             st.markdown('<div class="section-title">📅 預計上課日期推估</div>',unsafe_allow_html=True)
+            st.caption("依課程排定星期，從指定起始日往後推算預計上課日期，可獨立使用或供報名參考。")
             with get_conn() as conn:
                 crs_info=conn.execute("SELECT schedule_day,schedule_time FROM Courses WHERE id=?",(cid_e,)).fetchone()
             if crs_info:
                 target_wd=WD.get(str(crs_info["schedule_day"]),0); wd_time=str(crs_info["schedule_time"])
                 col_a,col_b=st.columns(2)
-                total_lessons=col_a.number_input("課程總堂數",min_value=1,max_value=200,value=12,step=1,key="est_lessons")
-                start_from=col_b.date_input("起始日期",value=date.today(),key="est_start")
+                est_lessons=col_a.number_input("課程總堂數",min_value=1,max_value=500,value=12,step=1,key="est_lessons",
+                                               help="輸入要推算的總堂數")
+                est_start=col_b.date_input("起始日期",value=date.today(),key="est_start",
+                                           help="從哪天開始推算")
                 if st.button("🔍 推算預計上課日期",key="calc_schedule"):
                     result_dates=[]
-                    cursor_date=start_from
-                    while len(result_dates)<total_lessons:
+                    cursor_date=est_start
+                    while len(result_dates)<est_lessons:
                         if cursor_date.weekday()==target_wd: result_dates.append(cursor_date)
                         cursor_date+=timedelta(days=1)
                     df_sched=pd.DataFrame({
@@ -878,9 +923,10 @@ def page_admin_courses():
                         "上課時間":wd_time,
                     })
                     st.dataframe(df_sched,use_container_width=True,height=300)
+                    st.caption(f"共 {est_lessons} 堂，課程星期：{crs_info['schedule_day']}，每週上課時間：{wd_time}")
                     st.download_button("⬇️ 下載預計上課日期表",
                         data=df_sched.to_csv(index=False).encode("utf-8-sig"),
-                        file_name=f"預計上課日期_{cid_e}_{start_from}.csv",mime="text/csv")
+                        file_name=f"預計上課日期_{cid_e}_{est_start}.csv",mime="text/csv")
 
     with t4:
         st.markdown('<div class="section-title">🏓 選定星期的桌次甘特圖</div>',unsafe_allow_html=True)
