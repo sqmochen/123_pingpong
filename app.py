@@ -539,71 +539,107 @@ def page_coach_students():
 def page_coach_attendance():
     st.markdown('<div class="page-title">✅ 課堂點名</div>',unsafe_allow_html=True); st.divider()
     cid_c=st.session_state.get("profile_id")
-    with get_conn() as conn:
-        courses=pd.read_sql_query("""
-            SELECT c.id, c.schedule_day, c.schedule_time, c.table_id,
-                   COALESCE(c.course_code,'—')||' '||c.course_type||' '||c.schedule_day||' '||c.schedule_time AS label
-            FROM Courses c WHERE c.coach_id=? ORDER BY c.schedule_day, c.schedule_time
-        """,conn,params=(cid_c,))
-    if courses.empty: st.info("您目前沒有負責的課程。"); return
-    cmap=dict(zip(courses["label"],courses["id"]))
-    cinfo=courses.set_index("id")
-    c1,c2=st.columns(2)
-    sel=c1.selectbox("選擇課程",list(cmap.keys()))
-    sess_date=c2.date_input("上課日期",value=date.today())
-    cid=cmap[sel]; row=cinfo.loc[cid]
-    if sess_date.weekday()!=WD.get(str(row["schedule_day"]),-1):
-        wd=["一","二","三","四","五","六","日"]
-        st.warning(f"⚠️ 所選日期（{wd[sess_date.weekday()]}）與課程上課日（{row['schedule_day']}）不符，請確認。")
 
-    # 顯示上次點名完成通知
+    # ── 顯示上次點名完成通知（rerun 後在頁面頂部顯示）───────────
     if "att_done_msg" in st.session_state:
         st.success(st.session_state.pop("att_done_msg"))
 
+    # ── 需求①：上課日期固定為今天，不提供選擇器 ─────────────────
+    sess_date = date.today()
+    wd_names  = ["一","二","三","四","五","六","日"]
+    today_wd_label = f"週{wd_names[sess_date.weekday()]}"   # 例：週四
+    st.markdown(
+        f"<small style='color:#888;'>今日上課日期：{sess_date.isoformat()}（{today_wd_label}）</small>",
+        unsafe_allow_html=True)
+
+    # ── 需求③：課程選單只顯示今天星期相符的課程 ─────────────────
+    with get_conn() as conn:
+        courses=pd.read_sql_query("""
+            SELECT c.id, c.schedule_day, c.schedule_time, c.table_id,
+                   COALESCE(c.course_code,'—')||' '||c.course_type||' '||
+                   c.schedule_day||' '||c.schedule_time AS label
+            FROM Courses c
+            WHERE c.coach_id=? AND c.schedule_day=?
+            ORDER BY c.schedule_time
+        """,conn,params=(cid_c, today_wd_label))
+
+    # 今天無排課則提示並結束
+    if courses.empty:
+        st.info(f"今日（{today_wd_label}）無排定課程。"); return
+
+    cmap  = dict(zip(courses["label"], courses["id"]))
+    cinfo = courses.set_index("id")
+    sel   = st.selectbox("選擇課程", list(cmap.keys()))
+    cid   = cmap[sel]; row = cinfo.loc[cid]
+
+    # ── 取得學員清單 ─────────────────────────────────────────────
     with get_conn() as conn:
         stus=pd.read_sql_query("""
             SELECT u.id, u.name FROM Enrollments e JOIN Users u ON e.student_id=u.id
             WHERE e.course_id=? ORDER BY u.name
         """,conn,params=(cid,))
     if stus.empty: st.warning("此課程尚無學員，無法點名。"); return
+
+    # ── 需求②：進入頁面時只查詢 ClassSessions，不自動建立 ────────
+    # 僅在「送出點名後」才建立 ClassSessions，避免多餘紀錄
     with get_conn() as conn:
-        sess=conn.execute("SELECT id FROM ClassSessions WHERE course_id=? AND session_date=?",
-                          (cid,sess_date.isoformat())).fetchone()
-        if not sess:
-            cur=conn.execute(
-                "INSERT INTO ClassSessions(course_id,session_date,session_time,coach_id,table_id,created_by)"
-                " VALUES(?,?,?,?,?,'coach_點名')",
-                (cid,sess_date.isoformat(),str(row["schedule_time"]),cid_c,int(row["table_id"])))
-            conn.commit(); sess_id=cur.lastrowid
-        else:
-            sess_id=sess["id"]
-        existing=conn.execute("SELECT student_id,status FROM Attendance WHERE session_id=?",
-                              (sess_id,)).fetchall()
-        # 請假聯動：直接用 leave_date 比對，不需 session_id
-        approved=set(r["student_id"] for r in conn.execute("""
+        sess_row = conn.execute(
+            "SELECT id FROM ClassSessions WHERE course_id=? AND session_date=?",
+            (cid, sess_date.isoformat())).fetchone()
+        sess_id = sess_row["id"] if sess_row else None
+
+        # 若已有場次紀錄，讀取現有出勤狀態（供 Radio 帶入預設值）
+        existing = conn.execute(
+            "SELECT student_id,status FROM Attendance WHERE session_id=?",
+            (sess_id,)).fetchall() if sess_id else []
+
+        # 請假聯動：已核准的請假申請 → 預設「請假」
+        approved = set(r["student_id"] for r in conn.execute("""
             SELECT student_id FROM LeaveRequests
             WHERE course_id=? AND leave_date=? AND status='approved'
-        """,(cid,sess_date.isoformat())).fetchall())
-    em={r["student_id"]:r["status"] for r in existing}
-    opts=["出席","缺席","請假"]; rev={"出席":"present","缺席":"absent","請假":"leave"}
-    fwd={"present":"出席","absent":"缺席","leave":"請假"}
-    st.markdown(f'<div class="section-title">👥 點名列表（共 {len(stus)} 位學員）</div>',unsafe_allow_html=True)
+        """,(cid, sess_date.isoformat())).fetchall())
+
+    em  = {r["student_id"]: r["status"] for r in existing}
+    opts= ["出席","缺席","請假"]
+    rev = {"出席":"present","缺席":"absent","請假":"leave"}
+    fwd = {"present":"出席","absent":"缺席","leave":"請假"}
+
+    st.markdown(
+        f'<div class="section-title">👥 點名列表（共 {len(stus)} 位學員）</div>',
+        unsafe_allow_html=True)
+
+    # 用 sess_date 作為 key 的一部分，避免跨課程 key 衝突
     sels={}
     for _,stu in stus.iterrows():
         if stu["id"] in approved: dflt,sfx="請假","　🏷️ 已核准請假"
         else: dflt,sfx=fwd.get(em.get(stu["id"],"present"),"出席"),""
-        sels[stu["id"]]=st.radio(f"**{stu['name']}**{sfx}",opts,
-                                  index=opts.index(dflt),horizontal=True,
-                                  key=f"att_{sess_id}_{stu['id']}")
+        sels[stu["id"]]=st.radio(
+            f"**{stu['name']}**{sfx}", opts,
+            index=opts.index(dflt), horizontal=True,
+            key=f"att_{cid}_{sess_date.isoformat()}_{stu['id']}")
+
     if st.button("📝 送出點名結果",type="primary",use_container_width=True):
         with get_conn() as conn:
+            # ── 需求②：送出後才建立 ClassSessions（若尚未存在）──
+            if sess_id is None:
+                cur=conn.execute(
+                    "INSERT INTO ClassSessions"
+                    "(course_id,session_date,session_time,coach_id,table_id,created_by)"
+                    " VALUES(?,?,?,?,?,'coach_點名')",
+                    (cid, sess_date.isoformat(), str(row["schedule_time"]),
+                     cid_c, int(row["table_id"])))
+                conn.commit(); sess_id=cur.lastrowid
+
+            # 更新或新增 Attendance（ON CONFLICT DO UPDATE 確保同天只有一筆）
             for sid_s,sl in sels.items():
                 conn.execute("""
                     INSERT INTO Attendance(session_id,student_id,status) VALUES(?,?,?)
                     ON CONFLICT(session_id,student_id) DO UPDATE SET status=excluded.status
-                """,(sess_id,sid_s,rev[sl]))
+                """,(sess_id, sid_s, rev[sl]))
             conn.commit()
-        p=sum(1 for v in sels.values() if v=="出席"); a=sum(1 for v in sels.values() if v=="缺席")
+
+        p =sum(1 for v in sels.values() if v=="出席")
+        a =sum(1 for v in sels.values() if v=="缺席")
         lv=sum(1 for v in sels.values() if v=="請假")
         st.session_state["att_done_msg"]=(
             f"✅ 點名完成！課程：{sel}　日期：{sess_date.isoformat()}　"
