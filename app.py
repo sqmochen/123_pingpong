@@ -1769,14 +1769,20 @@ def page_admin_db():
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     for tbl in DB_TABLES_INSERT:
                         df_tbl = pd.read_sql_query(f"SELECT * FROM {tbl}", conn)
-
-                        # ── 在第 1 列插入欄位說明 ─────────────
                         col_desc = DB_COL_DESC.get(tbl, {})
-                        desc_row = {col: col_desc.get(col, "") for col in df_tbl.columns}
-                        df_desc  = pd.DataFrame([desc_row])      # 說明列
-                        df_out   = pd.concat([df_desc, df_tbl], ignore_index=True)
-                        # 欄位名稱仍保留為 header（原始英文名稱）
-                        df_out.to_excel(writer, sheet_name=tbl, index=False)
+                        cols = list(df_tbl.columns)
+
+                        # ── 正確順序：說明列→欄位名稱列→資料 ──
+                        # 直接用 openpyxl 手動寫入，避免 to_excel header 搶先輸出
+                        ws = writer.book.create_sheet(title=tbl)
+
+                        # 第 1 列：欄位說明文字（中文）
+                        ws.append([col_desc.get(c, "") for c in cols])
+                        # 第 2 列：欄位名稱（原始英文）
+                        ws.append(cols)
+                        # 第 3 列起：實際資料
+                        for row in df_tbl.itertuples(index=False):
+                            ws.append(list(row))
 
                     # ── 使用者備忘 Sheet（空白，供自行填寫）──
                     df_memo = pd.DataFrame(columns=["日期","類別","相關人員","備忘內容","處理狀況"])
