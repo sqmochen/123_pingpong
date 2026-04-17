@@ -1,12 +1,12 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.9  |  Tab3 報名新增總堂數/開始日期/累加繳費
+# 規格版本：v1.10 |  新增資料庫管理（Excel下載/上傳覆蓋）
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
 
 import streamlit as st
-import sqlite3, hashlib, re
+import sqlite3, hashlib, re, io
 import pandas as pd
 from datetime import datetime, date, timedelta
 import plotly.graph_objects as go
@@ -263,7 +263,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.9</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.10</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -301,7 +301,7 @@ def logout():
 MENUS = {
     "student":["📚 我的課程","🙏 請假申請","💳 繳費狀況","📋 出勤紀錄","📅 近期課程查詢"],
     "coach"  :["👤 個人簡介編輯","👥 課程學員名單","✅ 課堂點名","🙏 請假審核","📅 近期課程查詢"],
-    "admin"  :["📅 課程管理","📊 出勤總表","💰 繳費管理","📈 報表查詢","🔑 帳號管理","📅 近期課程查詢"],
+    "admin"  :["📅 課程管理","📊 出勤總表","💰 繳費管理","📈 報表查詢","🔑 帳號管理","📅 近期課程查詢","💾 資料庫管理"],
 }
 RLABEL={"student":"學員","coach":"教練","admin":"管理者"}
 RBADGE={"student":"role-badge-student","coach":"role-badge-coach","admin":"role-badge-admin"}
@@ -1654,6 +1654,160 @@ def page_weekly_schedule():
 
 
 # ══════════════════════════════════════════════════════════════
+# 💾  資料庫管理（下載 Excel / 上傳覆蓋）
+# ══════════════════════════════════════════════════════════════
+
+# 7 張資料表的正確順序（清空與重寫時使用）
+DB_TABLES_DELETE = [
+    "Attendance","Payments","LeaveRequests",
+    "ClassSessions","Enrollments","Courses","Tables","Users"
+]
+DB_TABLES_INSERT = [
+    "Users","Tables","Courses","Enrollments",
+    "ClassSessions","Attendance","LeaveRequests","Payments"
+]
+
+def page_admin_db():
+    st.markdown('<div class="page-title">💾 資料庫管理</div>',unsafe_allow_html=True)
+    st.divider()
+
+    # ── 下載區 ────────────────────────────────────────────────
+    st.markdown('<div class="section-title">📥 下載所有表單</div>',unsafe_allow_html=True)
+    st.caption("將 7 張資料表匯出為一個 Excel 檔案，每張表單各一個 Sheet，欄位格式與資料庫完全一致（含密碼雜湊值）。")
+
+    if st.button("⬇️ 產生資料庫 Excel 下載檔",type="primary",key="gen_excel"):
+        try:
+            buf = io.BytesIO()
+            with get_conn() as conn:
+                # 依插入順序逐表匯出，確保 Sheet 順序合理
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    for tbl in DB_TABLES_INSERT:
+                        df_tbl = pd.read_sql_query(f"SELECT * FROM {tbl}", conn)
+                        df_tbl.to_excel(writer, sheet_name=tbl, index=False)
+            buf.seek(0)
+            filename = f"pingpong_export_{date.today().isoformat()}.xlsx"
+            st.download_button(
+                label=f"⬇️ 下載 {filename}",
+                data=buf,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_excel"
+            )
+            st.success(f"✅ 已產生 Excel 檔案，共 {len(DB_TABLES_INSERT)} 個 Sheet，點擊上方按鈕下載。")
+        except Exception as e:
+            st.error(f"產生失敗：{e}")
+
+    st.divider()
+
+    # ── 上傳覆蓋區 ────────────────────────────────────────────
+    st.markdown('<div class="section-title">📤 上傳 Excel 覆蓋資料庫</div>',unsafe_allow_html=True)
+    st.warning(
+        "⚠️ **執行前請確認已下載備份！**\n\n"
+        "上傳後將**清空現有所有資料**並以 Excel 內容重寫，此操作**無法復原**。\n\n"
+        "上傳的 Excel 格式必須與下載檔案一致，需包含以下 7 個 Sheet：\n"
+        "`Users`、`Tables`、`Courses`、`Enrollments`、`ClassSessions`、`Attendance`、`LeaveRequests`、`Payments`"
+    )
+
+    uploaded = st.file_uploader(
+        "選擇 Excel 檔案（.xlsx）",
+        type=["xlsx"],
+        key="upload_excel",
+        help="僅接受從本系統下載的標準格式 Excel 檔案"
+    )
+
+    if uploaded is not None:
+        try:
+            # 讀取所有 Sheet
+            xl = pd.ExcelFile(uploaded)
+            found_sheets = xl.sheet_names
+
+            # 驗證必要 Sheet 是否存在
+            required = set(DB_TABLES_INSERT)
+            missing  = required - set(found_sheets)
+            if missing:
+                st.error(f"❌ 缺少必要的 Sheet：{sorted(missing)}，請確認上傳檔案格式正確。")
+                return
+
+            # 預覽各 Sheet 筆數
+            st.markdown('<div class="section-title">📋 上傳內容預覽</div>',unsafe_allow_html=True)
+            preview_rows = []
+            sheet_dfs = {}
+            for tbl in DB_TABLES_INSERT:
+                df_up = xl.parse(tbl)
+                sheet_dfs[tbl] = df_up
+                # 現有資料庫筆數
+                with get_conn() as conn:
+                    cur_cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                preview_rows.append({
+                    "資料表": tbl,
+                    "上傳筆數": len(df_up),
+                    "現有筆數": cur_cnt,
+                    "欄位數": len(df_up.columns),
+                })
+            df_preview = pd.DataFrame(preview_rows)
+            st.dataframe(df_preview, use_container_width=True, height=320)
+            total_upload = df_preview["上傳筆數"].sum()
+            st.caption(f"上傳總筆數：{total_upload} 筆（現有資料將全部清空後以此內容覆蓋）")
+
+            st.divider()
+
+            # 確認核取方塊（兩層防呆）
+            confirm1 = st.checkbox(
+                "✅ 我已確認上傳內容正確，並已完成備份",
+                key="db_confirm1")
+            confirm2 = st.checkbox(
+                "✅ 我了解執行後現有資料將全部清空且**無法復原**",
+                key="db_confirm2")
+
+            can_exec = confirm1 and confirm2
+
+            if st.button("🔄 執行覆蓋資料庫",
+                         type="primary",
+                         disabled=not can_exec,
+                         key="do_overwrite"):
+                try:
+                    with get_conn() as conn:
+                        cur = conn.cursor()
+                        # 暫時關閉外鍵約束，方便清空
+                        cur.execute("PRAGMA foreign_keys = OFF")
+
+                        # 清空順序：從子表往父表刪
+                        for tbl in DB_TABLES_DELETE:
+                            cur.execute(f"DELETE FROM {tbl}")
+
+                        # 重寫順序：從父表往子表插入
+                        total_inserted = 0
+                        for tbl in DB_TABLES_INSERT:
+                            df_up = sheet_dfs[tbl]
+                            if df_up.empty: continue
+                            # 處理 None/NaN
+                            df_up = df_up.where(pd.notnull(df_up), None)
+                            cols = ",".join(df_up.columns)
+                            ph   = ",".join(["?"]*len(df_up.columns))
+                            for _, row in df_up.iterrows():
+                                cur.execute(
+                                    f"INSERT OR REPLACE INTO {tbl}({cols}) VALUES({ph})",
+                                    tuple(row))
+                            total_inserted += len(df_up)
+
+                        # 重新啟用外鍵約束
+                        cur.execute("PRAGMA foreign_keys = ON")
+                        conn.commit()
+
+                    st.success(
+                        f"✅ 資料庫覆蓋完成！共匯入 **{total_inserted}** 筆資料，"
+                        f"涵蓋 {len(DB_TABLES_INSERT)} 張資料表。\n\n"
+                        "請重新整理頁面以確認資料已更新。")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"❌ 覆蓋失敗：{e}\n\n資料庫可能處於不一致狀態，建議重新上傳或還原備份。")
+
+        except Exception as e:
+            st.error(f"❌ 讀取 Excel 失敗：{e}")
+
+
+# ══════════════════════════════════════════════════════════════
 # 🚀  主程式
 # ══════════════════════════════════════════════════════════════
 
@@ -1673,7 +1827,8 @@ def main():
     elif role=="admin":
         pages={"📅 課程管理":page_admin_courses,"📊 出勤總表":page_admin_attendance,
                "💰 繳費管理":page_admin_payments,"📈 報表查詢":page_admin_reports,
-               "🔑 帳號管理":page_admin_accounts,"📅 近期課程查詢":page_weekly_schedule}
+               "🔑 帳號管理":page_admin_accounts,"📅 近期課程查詢":page_weekly_schedule,
+               "💾 資料庫管理":page_admin_db}
     else:
         st.error("未知角色，請重新登入。"); return
     (pages.get(sel) or list(pages.values())[0])()
