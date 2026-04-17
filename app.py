@@ -7,10 +7,19 @@
 
 import streamlit as st
 import sqlite3, hashlib, re, io
+import subprocess, sys
 import pandas as pd
 from datetime import datetime, date, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
+
+# ── openpyxl 自動安裝（Excel 匯出/匯入所需）──────────────────
+try:
+    import openpyxl
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "openpyxl", "--quiet", "--break-system-packages"])
+    import openpyxl
 
 DB_PATH = "./pingpong.db"
 
