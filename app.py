@@ -1785,8 +1785,9 @@ def page_admin_db():
                             ws.append(list(row))
 
                     # ── 使用者備忘 Sheet（空白，供自行填寫）──
-                    df_memo = pd.DataFrame(columns=["日期","類別","相關人員","備忘內容","處理狀況"])
-                    df_memo.to_excel(writer, sheet_name=MEMO_SHEET, index=False)
+                    # 改用 openpyxl 直接建立，與資料表 Sheet 寫入方式一致，避免混用導致錯亂
+                    ws_memo = writer.book.create_sheet(title=MEMO_SHEET)
+                    ws_memo.append(["日期","類別","相關人員","備忘內容","處理狀況"])
 
             buf.seek(0)
             filename = f"pingpong_export_{date.today().isoformat()}.xlsx"
