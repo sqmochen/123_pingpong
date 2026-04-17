@@ -1668,23 +1668,120 @@ DB_TABLES_INSERT = [
     "ClassSessions","Attendance","LeaveRequests","Payments"
 ]
 
+# ── 各資料表欄位說明對照（下載 Excel 第 1 列插入說明文字）──
+DB_COL_DESC = {
+    "Users": {
+        "id":         "帳號唯一識別碼（自動遞增主鍵）",
+        "username":   "登入帳號（唯一值，不可重複）",
+        "password":   "登入密碼（SHA-256 雜湊值，非明文）",
+        "role":       "角色（admin=管理者 / coach=教練 / student=學員）",
+        "email":      "電子郵件（選填）",
+        "name":       "姓名（顯示名稱）",
+        "phone":      "聯絡電話",
+        "bio":        "個人簡介（教練專用）",
+        "specialty":  "專長（教練專用）",
+        "photo_path": "大頭照路徑（保留欄位，目前未使用）",
+    },
+    "Tables": {
+        "id":   "桌次編號（1～8）",
+        "name": "桌次名稱（桌1～桌8）",
+    },
+    "Courses": {
+        "id":            "課程唯一識別碼（自動遞增主鍵）",
+        "course_code":   "課程代號（格式：星期碼-桌次-HHMM-時長3碼，例：1-1-1000-090）",
+        "course_type":   "課程類型（團體班 / 個人班 / 寒假班 / 暑假班）",
+        "coach_id":      "負責教練 ID（對應 Users.id，role=coach）",
+        "schedule_day":  "上課星期（週一 ～ 週日）",
+        "schedule_time": "上課時間（HH:MM 格式，例：10:00）",
+        "duration":      "課程時長（分鐘，例：60 / 90 / 120）",
+        "table_id":      "使用桌次 ID（對應 Tables.id，1～8）",
+    },
+    "Enrollments": {
+        "id":            "報名唯一識別碼（自動遞增主鍵）",
+        "student_id":    "學員 ID（對應 Users.id，role=student）",
+        "course_id":     "課程 ID（對應 Courses.id）",
+        "fee":           "整期總費用（新台幣元）",
+        "enrolled_date": "報名日期（YYYY-MM-DD）",
+        "total_lessons": "本次報名課程總堂數",
+        "start_date":    "開始上課日期（YYYY-MM-DD）",
+    },
+    "ClassSessions": {
+        "id":           "場次唯一識別碼（自動遞增主鍵）",
+        "course_id":    "課程 ID（對應 Courses.id）",
+        "session_date": "實際上課日期（YYYY-MM-DD）",
+        "session_time": "實際上課時間（HH:MM）",
+        "coach_id":     "授課教練 ID（對應 Users.id，role=coach）",
+        "table_id":     "使用桌次 ID（對應 Tables.id）",
+        "created_by":   "場次建立來源（coach_點名=教練點名建立 / simulation=模擬資料）",
+    },
+    "Attendance": {
+        "id":         "出勤紀錄唯一識別碼（自動遞增主鍵）",
+        "session_id": "場次 ID（對應 ClassSessions.id）",
+        "student_id": "學員 ID（對應 Users.id，role=student）",
+        "status":     "出勤狀態（present=出席 / absent=缺席 / leave=請假）",
+        "note":       "備註說明（管理者自行填寫，例：補課安排）",
+    },
+    "LeaveRequests": {
+        "id":            "請假申請唯一識別碼（自動遞增主鍵）",
+        "student_id":    "學員 ID（對應 Users.id）",
+        "course_id":     "請假對應課程 ID（對應 Courses.id）",
+        "leave_date":    "請假日期（YYYY-MM-DD）",
+        "reason":        "請假原因（學員填寫，選填）",
+        "status":        "審核狀態（pending=待審核 / approved=已核准 / rejected=已駁回）",
+        "reviewed_by":   "審核者 ID（對應 Users.id，role=coach）",
+        "reviewed_at":   "審核時間（ISO 格式時間戳記）",
+        "reject_reason": "駁回原因（教練填寫，駁回時必填）",
+        "created_at":    "申請建立時間（ISO 格式時間戳記）",
+    },
+    "Payments": {
+        "id":          "繳費單唯一識別碼（自動遞增主鍵）",
+        "student_id":  "學員 ID（對應 Users.id）",
+        "course_id":   "課程 ID（對應 Courses.id）",
+        "amount":      "應繳金額（新台幣元）",
+        "paid_date":   "實際繳費日期（YYYY-MM-DD，未繳時為空）",
+        "paid_time":   "實際繳費時間（HH:MM，未繳時為空）",
+        "is_paid":     "繳費狀態（0=未繳 / 1=已繳）",
+        "period":      "繳費期別（YYYY-MM，例：2026-04）",
+        "created_at":  "繳費單建立時間（ISO 格式時間戳記，多筆報名時以此區分先後）",
+    },
+}
+
+# 使用者備忘 Sheet 名稱（不與資料庫互動）
+MEMO_SHEET = "使用者備忘"
+
+
 def page_admin_db():
     st.markdown('<div class="page-title">💾 資料庫管理</div>',unsafe_allow_html=True)
     st.divider()
 
     # ── 下載區 ────────────────────────────────────────────────
     st.markdown('<div class="section-title">📥 下載所有表單</div>',unsafe_allow_html=True)
-    st.caption("將 7 張資料表匯出為一個 Excel 檔案，每張表單各一個 Sheet，欄位格式與資料庫完全一致（含密碼雜湊值）。")
+    st.caption(
+        "將 7 張資料表匯出為一個 Excel 檔案（共 9 個 Sheet）。"
+        "每張資料表第 1 列為欄位說明、第 2 列為欄位名稱、第 3 列起為實際資料。"
+        "最後一個 Sheet「使用者備忘」供自行填寫，不與資料庫互動。"
+    )
 
     if st.button("⬇️ 產生資料庫 Excel 下載檔",type="primary",key="gen_excel"):
         try:
             buf = io.BytesIO()
             with get_conn() as conn:
-                # 依插入順序逐表匯出，確保 Sheet 順序合理
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     for tbl in DB_TABLES_INSERT:
                         df_tbl = pd.read_sql_query(f"SELECT * FROM {tbl}", conn)
-                        df_tbl.to_excel(writer, sheet_name=tbl, index=False)
+
+                        # ── 在第 1 列插入欄位說明 ─────────────
+                        col_desc = DB_COL_DESC.get(tbl, {})
+                        desc_row = {col: col_desc.get(col, "") for col in df_tbl.columns}
+                        df_desc  = pd.DataFrame([desc_row])      # 說明列
+                        df_out   = pd.concat([df_desc, df_tbl], ignore_index=True)
+                        # 欄位名稱仍保留為 header（原始英文名稱）
+                        df_out.to_excel(writer, sheet_name=tbl, index=False)
+
+                    # ── 使用者備忘 Sheet（空白，供自行填寫）──
+                    df_memo = pd.DataFrame(columns=["日期","類別","相關人員","備忘內容","處理狀況"])
+                    df_memo.to_excel(writer, sheet_name=MEMO_SHEET, index=False)
+
             buf.seek(0)
             filename = f"pingpong_export_{date.today().isoformat()}.xlsx"
             st.download_button(
@@ -1694,7 +1791,10 @@ def page_admin_db():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dl_excel"
             )
-            st.success(f"✅ 已產生 Excel 檔案，共 {len(DB_TABLES_INSERT)} 個 Sheet，點擊上方按鈕下載。")
+            st.success(
+                f"✅ 已產生 Excel 檔案，共 {len(DB_TABLES_INSERT)+1} 個 Sheet"
+                f"（資料表 {len(DB_TABLES_INSERT)} 個 + 使用者備忘 1 個），點擊上方按鈕下載。"
+            )
         except Exception as e:
             st.error(f"產生失敗：{e}")
 
@@ -1705,8 +1805,9 @@ def page_admin_db():
     st.warning(
         "⚠️ **執行前請確認已下載備份！**\n\n"
         "上傳後將**清空現有所有資料**並以 Excel 內容重寫，此操作**無法復原**。\n\n"
-        "上傳的 Excel 格式必須與下載檔案一致，需包含以下 7 個 Sheet：\n"
-        "`Users`、`Tables`、`Courses`、`Enrollments`、`ClassSessions`、`Attendance`、`LeaveRequests`、`Payments`"
+        "上傳的 Excel 必須包含以下 8 個 Sheet：\n"
+        "`Users`、`Tables`、`Courses`、`Enrollments`、`ClassSessions`、`Attendance`、`LeaveRequests`、`Payments`\n\n"
+        "「使用者備忘」Sheet 若存在將**自動略過**，不影響資料庫。"
     )
 
     uploaded = st.file_uploader(
@@ -1718,32 +1819,36 @@ def page_admin_db():
 
     if uploaded is not None:
         try:
-            # 讀取所有 Sheet
             xl = pd.ExcelFile(uploaded)
             found_sheets = xl.sheet_names
 
-            # 驗證必要 Sheet 是否存在
+            # 驗證必要 Sheet 是否存在（只驗資料表 Sheet，略過備忘 Sheet）
             required = set(DB_TABLES_INSERT)
             missing  = required - set(found_sheets)
             if missing:
                 st.error(f"❌ 缺少必要的 Sheet：{sorted(missing)}，請確認上傳檔案格式正確。")
                 return
 
-            # 預覽各 Sheet 筆數
+            # 提示備忘 Sheet 略過狀況
+            extra = [s for s in found_sheets if s not in required]
+            if extra:
+                st.info(f"ℹ️ 偵測到非資料庫 Sheet：{extra}，上傳時將自動略過，不影響資料庫。")
+
+            # 預覽各資料表 Sheet 筆數（跳過第 1 列說明列，從第 2 列欄位名稱起算）
             st.markdown('<div class="section-title">📋 上傳內容預覽</div>',unsafe_allow_html=True)
             preview_rows = []
             sheet_dfs = {}
             for tbl in DB_TABLES_INSERT:
-                df_up = xl.parse(tbl)
+                # header=1 → 以第 2 列（index=1）為欄位名稱，跳過第 1 列說明文字
+                df_up = xl.parse(tbl, header=1)
                 sheet_dfs[tbl] = df_up
-                # 現有資料庫筆數
                 with get_conn() as conn:
                     cur_cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
                 preview_rows.append({
-                    "資料表": tbl,
+                    "資料表":  tbl,
                     "上傳筆數": len(df_up),
                     "現有筆數": cur_cnt,
-                    "欄位數": len(df_up.columns),
+                    "欄位數":  len(df_up.columns),
                 })
             df_preview = pd.DataFrame(preview_rows)
             st.dataframe(df_preview, use_container_width=True, height=320)
@@ -1753,35 +1858,22 @@ def page_admin_db():
             st.divider()
 
             # 確認核取方塊（兩層防呆）
-            confirm1 = st.checkbox(
-                "✅ 我已確認上傳內容正確，並已完成備份",
-                key="db_confirm1")
-            confirm2 = st.checkbox(
-                "✅ 我了解執行後現有資料將全部清空且**無法復原**",
-                key="db_confirm2")
-
+            confirm1 = st.checkbox("✅ 我已確認上傳內容正確，並已完成備份", key="db_confirm1")
+            confirm2 = st.checkbox("✅ 我了解執行後現有資料將全部清空且**無法復原**", key="db_confirm2")
             can_exec = confirm1 and confirm2
 
             if st.button("🔄 執行覆蓋資料庫",
-                         type="primary",
-                         disabled=not can_exec,
-                         key="do_overwrite"):
+                         type="primary", disabled=not can_exec, key="do_overwrite"):
                 try:
                     with get_conn() as conn:
                         cur = conn.cursor()
-                        # 暫時關閉外鍵約束，方便清空
                         cur.execute("PRAGMA foreign_keys = OFF")
-
-                        # 清空順序：從子表往父表刪
                         for tbl in DB_TABLES_DELETE:
                             cur.execute(f"DELETE FROM {tbl}")
-
-                        # 重寫順序：從父表往子表插入
                         total_inserted = 0
                         for tbl in DB_TABLES_INSERT:
                             df_up = sheet_dfs[tbl]
                             if df_up.empty: continue
-                            # 處理 None/NaN
                             df_up = df_up.where(pd.notnull(df_up), None)
                             cols = ",".join(df_up.columns)
                             ph   = ",".join(["?"]*len(df_up.columns))
@@ -1790,17 +1882,13 @@ def page_admin_db():
                                     f"INSERT OR REPLACE INTO {tbl}({cols}) VALUES({ph})",
                                     tuple(row))
                             total_inserted += len(df_up)
-
-                        # 重新啟用外鍵約束
                         cur.execute("PRAGMA foreign_keys = ON")
                         conn.commit()
-
                     st.success(
                         f"✅ 資料庫覆蓋完成！共匯入 **{total_inserted}** 筆資料，"
                         f"涵蓋 {len(DB_TABLES_INSERT)} 張資料表。\n\n"
                         "請重新整理頁面以確認資料已更新。")
                     st.rerun()
-
                 except Exception as e:
                     st.error(f"❌ 覆蓋失敗：{e}\n\n資料庫可能處於不一致狀態，建議重新上傳或還原備份。")
 
