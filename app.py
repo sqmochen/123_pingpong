@@ -184,6 +184,16 @@ def init_db():
             created_at    TEXT NOT NULL,
             FOREIGN KEY(student_id) REFERENCES Users(id),
             FOREIGN KEY(course_id)  REFERENCES Courses(id));
+
+        -- ⑨ MemoPad：使用者備忘（v1.12：存入資料庫，隨 Excel 下載/上傳同步）
+        CREATE TABLE IF NOT EXISTS MemoPad(
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            項目        INTEGER,
+            主題        TEXT DEFAULT '',
+            內容        TEXT DEFAULT '',
+            說明        TEXT DEFAULT '',
+            備註        TEXT DEFAULT '',
+            created_at TEXT DEFAULT '');
         """)
 
         # 舊版升級：把 Users 補欄位（新部署不需要，舊 DB 升級用）
@@ -202,6 +212,7 @@ def init_db():
             # v1.9：Enrollments 新增總堂數與開始日期
             "ALTER TABLE Enrollments   ADD COLUMN total_lessons INTEGER DEFAULT NULL",
             "ALTER TABLE Enrollments   ADD COLUMN start_date    TEXT DEFAULT NULL",
+            # v1.12：MemoPad 新增資料表（透過 CREATE TABLE IF NOT EXISTS 處理，無需 ALTER）
         ]:
             try: cur.execute(sql)
             except: pass
@@ -1661,11 +1672,11 @@ def page_weekly_schedule():
 # 7 張資料表的正確順序（清空與重寫時使用）
 DB_TABLES_DELETE = [
     "Attendance","Payments","LeaveRequests",
-    "ClassSessions","Enrollments","Courses","Tables","Users"
+    "ClassSessions","Enrollments","Courses","Tables","Users","MemoPad"
 ]
 DB_TABLES_INSERT = [
     "Users","Tables","Courses","Enrollments",
-    "ClassSessions","Attendance","LeaveRequests","Payments"
+    "ClassSessions","Attendance","LeaveRequests","Payments","MemoPad"
 ]
 
 # ── 各資料表欄位說明對照（下載 Excel 第 1 列插入說明文字）──
@@ -1746,7 +1757,18 @@ DB_COL_DESC = {
     },
 }
 
-# 使用者備忘 Sheet 名稱（不與資料庫互動）
+# MemoPad 欄位說明
+DB_COL_DESC["MemoPad"] = {
+    "id":         "備忘唯一識別碼（自動遞增主鍵）",
+    "項目":        "備忘項目流水號",
+    "主題":        "備忘主題分類",
+    "內容":        "備忘內容",
+    "說明":        "詳細說明",
+    "備註":        "補充備註",
+    "created_at": "建立時間（ISO 格式時間戳記）",
+}
+
+# 使用者備忘 Sheet 名稱（對應 MemoPad 資料表）
 MEMO_SHEET = "使用者備忘"
 
 
@@ -1784,10 +1806,18 @@ def page_admin_db():
                         for row in df_tbl.itertuples(index=False):
                             ws.append(list(row))
 
-                    # ── 使用者備忘 Sheet（空白，供自行填寫）──
-                    # 改用 openpyxl 直接建立，與資料表 Sheet 寫入方式一致，避免混用導致錯亂
+                    # ── 使用者備忘 Sheet：從 MemoPad 資料表讀取（v1.12）──
+                    df_memo = pd.read_sql_query("SELECT * FROM MemoPad", conn)
+                    memo_cols = list(df_memo.columns)
+                    memo_desc = DB_COL_DESC.get("MemoPad", {})
                     ws_memo = writer.book.create_sheet(title=MEMO_SHEET)
-                    ws_memo.append(["日期","類別","相關人員","備忘內容","處理狀況"])
+                    # 第 1 列：欄位說明
+                    ws_memo.append([memo_desc.get(c, "") for c in memo_cols])
+                    # 第 2 列：欄位名稱
+                    ws_memo.append(memo_cols)
+                    # 第 3 列起：實際備忘資料
+                    for row in df_memo.itertuples(index=False):
+                        ws_memo.append(list(row))
 
             buf.seek(0)
             filename = f"pingpong_export_{date.today().isoformat()}.xlsx"
@@ -1799,8 +1829,8 @@ def page_admin_db():
                 key="dl_excel"
             )
             st.success(
-                f"✅ 已產生 Excel 檔案，共 {len(DB_TABLES_INSERT)+1} 個 Sheet"
-                f"（資料表 {len(DB_TABLES_INSERT)} 個 + 使用者備忘 1 個），點擊上方按鈕下載。"
+                f"✅ 已產生 Excel 檔案，共 {len(DB_TABLES_INSERT)} 個 Sheet"
+                f"（資料表 {len(DB_TABLES_INSERT)-1} 個 + 使用者備忘 1 個），點擊上方按鈕下載。"
             )
         except Exception as e:
             st.error(f"產生失敗：{e}")
@@ -1812,9 +1842,9 @@ def page_admin_db():
     st.warning(
         "⚠️ **執行前請確認已下載備份！**\n\n"
         "上傳後將**清空現有所有資料**並以 Excel 內容重寫，此操作**無法復原**。\n\n"
-        "上傳的 Excel 必須包含以下 8 個 Sheet：\n"
-        "`Users`、`Tables`、`Courses`、`Enrollments`、`ClassSessions`、`Attendance`、`LeaveRequests`、`Payments`\n\n"
-        "「使用者備忘」Sheet 若存在將**自動略過**，不影響資料庫。"
+        "上傳的 Excel 必須包含以下 9 個 Sheet（8 張資料表 + 使用者備忘）：\n"
+        "`Users`、`Tables`、`Courses`、`Enrollments`、`ClassSessions`、`Attendance`、`LeaveRequests`、`Payments`、`使用者備忘`\n\n"
+        "「使用者備忘」Sheet 的內容將同步寫入資料庫，下次下載時可看到更新後的備忘資料。"
     )
 
     uploaded = st.file_uploader(
@@ -1829,17 +1859,13 @@ def page_admin_db():
             xl = pd.ExcelFile(uploaded)
             found_sheets = xl.sheet_names
 
-            # 驗證必要 Sheet 是否存在（只驗資料表 Sheet，略過備忘 Sheet）
-            required = set(DB_TABLES_INSERT)
-            missing  = required - set(found_sheets)
+            # 驗證必要 Sheet 是否存在（含使用者備忘 Sheet）
+            required_db   = set(DB_TABLES_INSERT)          # 9 張（含 MemoPad）
+            required_all  = required_db | {MEMO_SHEET}     # 加上備忘 Sheet 名稱
+            missing = (required_db - set(found_sheets))    # 只驗資料表，備忘可選
             if missing:
                 st.error(f"❌ 缺少必要的 Sheet：{sorted(missing)}，請確認上傳檔案格式正確。")
                 return
-
-            # 提示備忘 Sheet 略過狀況
-            extra = [s for s in found_sheets if s not in required]
-            if extra:
-                st.info(f"ℹ️ 偵測到非資料庫 Sheet：{extra}，上傳時將自動略過，不影響資料庫。")
 
             # 預覽各資料表 Sheet 筆數（跳過第 1 列說明列，從第 2 列欄位名稱起算）
             st.markdown('<div class="section-title">📋 上傳內容預覽</div>',unsafe_allow_html=True)
@@ -1857,6 +1883,19 @@ def page_admin_db():
                     "現有筆數": cur_cnt,
                     "欄位數":  len(df_up.columns),
                 })
+            # 備忘 Sheet 預覽
+            if MEMO_SHEET in found_sheets:
+                df_memo_up = xl.parse(MEMO_SHEET, header=1)
+                with get_conn() as conn:
+                    memo_cnt = conn.execute("SELECT COUNT(*) FROM MemoPad").fetchone()[0]
+                preview_rows.append({
+                    "資料表":  MEMO_SHEET,
+                    "上傳筆數": len(df_memo_up),
+                    "現有筆數": memo_cnt,
+                    "欄位數":  len(df_memo_up.columns),
+                })
+            else:
+                st.info("ℹ️ 未偵測到「使用者備忘」Sheet，備忘資料將維持現有狀態不變。")
             df_preview = pd.DataFrame(preview_rows)
             st.dataframe(df_preview, use_container_width=True, height=320)
             total_upload = df_preview["上傳筆數"].sum()
@@ -1889,6 +1928,18 @@ def page_admin_db():
                                     f"INSERT OR REPLACE INTO {tbl}({cols}) VALUES({ph})",
                                     tuple(row))
                             total_inserted += len(df_up)
+                        # ── 備忘 Sheet 寫入 MemoPad（v1.12）──
+                        if MEMO_SHEET in found_sheets:
+                            df_memo_up = xl.parse(MEMO_SHEET, header=1)
+                            df_memo_up = df_memo_up.where(pd.notnull(df_memo_up), None)
+                            if not df_memo_up.empty:
+                                memo_cols = ",".join(df_memo_up.columns)
+                                memo_ph   = ",".join(["?"]*len(df_memo_up.columns))
+                                for _, row in df_memo_up.iterrows():
+                                    cur.execute(
+                                        f"INSERT OR REPLACE INTO MemoPad({memo_cols}) VALUES({memo_ph})",
+                                        tuple(row))
+                                total_inserted += len(df_memo_up)
                         cur.execute("PRAGMA foreign_keys = ON")
                         conn.commit()
                     st.success(
