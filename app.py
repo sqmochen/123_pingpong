@@ -1,6 +1,6 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.10 |  新增資料庫管理（Excel下載/上傳覆蓋）
+# 規格版本：v1.13 |  管理者課堂點名/noted_by/台灣時間/選單重排
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
@@ -8,6 +8,16 @@
 import streamlit as st
 import sqlite3, hashlib, re, io
 import pandas as pd
+import pytz
+# ── 台灣時區工具函式 ─────────────────────────────────────────
+TZ_TW = pytz.timezone("Asia/Taipei")
+def now_tw():
+    """台灣當前時間（datetime）"""
+    from datetime import datetime as _dt
+    return _dt.now(TZ_TW)
+def today_tw():
+    """台灣當前日期（date）"""
+    return now_tw().date()
 from datetime import datetime, date, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
@@ -74,9 +84,9 @@ def check_conflict(conn, day, stime, dur, tbl, excl=None):
 
 def date_opts():
     wd=["一","二","三","四","五","六","日"]
-    return [(f"{(date.today()+timedelta(days=i)).strftime('%Y-%m-%d')}"
-             f"（{wd[(date.today()+timedelta(days=i)).weekday()]}）",
-             date.today()+timedelta(days=i)) for i in range(7)]
+    return [(f"{(today_tw()+timedelta(days=i)).strftime('%Y-%m-%d')}"
+             f"（{wd[(today_tw()+timedelta(days=i)).weekday()]}）",
+             today_tw()+timedelta(days=i)) for i in range(7)]
 
 WD={"週一":0,"週二":1,"週三":2,"週四":3,"週五":4,"週六":5,"週日":6}
 
@@ -151,6 +161,7 @@ def init_db():
             session_id    INTEGER NOT NULL,
             student_id    INTEGER NOT NULL,       -- FK → Users.id（role='student'）
             status        TEXT NOT NULL,          -- present / absent / leave
+            noted_by      TEXT DEFAULT '',        -- v1.13：點名者姓名（登入帳號的 name 欄位）
             note          TEXT DEFAULT '',
             UNIQUE(session_id, student_id),
             FOREIGN KEY(session_id) REFERENCES ClassSessions(id),
@@ -213,6 +224,8 @@ def init_db():
             "ALTER TABLE Enrollments   ADD COLUMN total_lessons INTEGER DEFAULT NULL",
             "ALTER TABLE Enrollments   ADD COLUMN start_date    TEXT DEFAULT NULL",
             # v1.12：MemoPad 新增資料表（透過 CREATE TABLE IF NOT EXISTS 處理，無需 ALTER）
+            # v1.13：Attendance 新增點名教練欄位
+            "ALTER TABLE Attendance    ADD COLUMN noted_by      TEXT DEFAULT ''",
         ]:
             try: cur.execute(sql)
             except: pass
@@ -254,14 +267,14 @@ def init_db():
                     (stu_uid["id"],crs["id"])).fetchone():
                 cur.execute(
                     "INSERT INTO Enrollments(student_id,course_id,fee,enrolled_date) VALUES(?,?,?,?)",
-                    (stu_uid["id"],crs["id"],2000,date.today().isoformat()))
-            period = date.today().strftime("%Y-%m")
+                    (stu_uid["id"],crs["id"],2000,today_tw().isoformat()))
+            period = today_tw().strftime("%Y-%m")
             if not cur.execute(
                     "SELECT id FROM Payments WHERE student_id=? AND course_id=? AND period=?",
                     (stu_uid["id"],crs["id"],period)).fetchone():
                 cur.execute(
                     "INSERT INTO Payments(student_id,course_id,amount,period,created_at) VALUES(?,?,?,?,?)",
-                    (stu_uid["id"],crs["id"],2000,period,datetime.now().isoformat()))
+                    (stu_uid["id"],crs["id"],2000,period,now_tw().isoformat()))
         conn.commit()
 
 
@@ -275,7 +288,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.10</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.13</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -313,7 +326,7 @@ def logout():
 MENUS = {
     "student":["📚 我的課程","🙏 請假申請","💳 繳費狀況","📋 出勤紀錄","📅 近期課程查詢"],
     "coach"  :["👤 個人簡介編輯","👥 課程學員名單","✅ 課堂點名","🙏 請假審核","📅 近期課程查詢"],
-    "admin"  :["📅 課程管理","📊 出勤總表","💰 繳費管理","📈 報表查詢","🔑 帳號管理","📅 近期課程查詢","💾 資料庫管理"],
+    "admin"  :["🔑 帳號管理","📅 課程管理","💰 繳費管理","✅ 管理者課堂點名","📊 出勤總表","📈 報表查詢","📅 近期課程查詢","💾 資料庫管理"],
 }
 RLABEL={"student":"學員","coach":"教練","admin":"管理者"}
 RBADGE={"student":"role-badge-student","coach":"role-badge-coach","admin":"role-badge-admin"}
@@ -380,7 +393,7 @@ def page_leave_request():
     st.markdown('<div class="section-title">📝 申請請假</div>',unsafe_allow_html=True)
     with st.form("leave_form"):
         sel   =st.selectbox("選擇課程",list(cmap.keys()))
-        ldate =st.date_input("請假日期",min_value=date.today())
+        ldate =st.date_input("請假日期",min_value=today_tw())
         reason=st.text_area("請假原因（選填）",height=80)
         submit=st.form_submit_button("📨 送出請假申請",type="primary")
     if submit:
@@ -393,7 +406,7 @@ def page_leave_request():
                 conn.execute(
                     "INSERT INTO LeaveRequests(student_id,course_id,leave_date,reason,status,created_at)"
                     " VALUES(?,?,?,?,'pending',?)",
-                    (sid,cid,ldate.isoformat(),reason,datetime.now().isoformat()))
+                    (sid,cid,ldate.isoformat(),reason,now_tw().isoformat()))
                 conn.commit()
             st.success("✅ 請假申請已送出，等待教練審核中。")
         except Exception as e: st.error(f"申請失敗：{e}")
@@ -557,7 +570,7 @@ def page_coach_attendance():
         st.success(st.session_state.pop("att_done_msg"))
 
     # ── 需求①：上課日期固定為今天，不提供選擇器 ─────────────────
-    sess_date = date.today()
+    sess_date = today_tw()
     wd_names  = ["一","二","三","四","五","六","日"]
     today_wd_label = f"週{wd_names[sess_date.weekday()]}"   # 例：週四
     st.markdown(
@@ -642,12 +655,14 @@ def page_coach_attendance():
                      cid_c, int(row["table_id"])))
                 conn.commit(); sess_id=cur.lastrowid
 
-            # 更新或新增 Attendance（ON CONFLICT DO UPDATE 確保同天只有一筆）
+            # 更新或新增 Attendance（v1.13：同步寫入 noted_by 點名教練姓名）
+            noter = st.session_state.get("profile_name","")
             for sid_s,sl in sels.items():
                 conn.execute("""
-                    INSERT INTO Attendance(session_id,student_id,status) VALUES(?,?,?)
-                    ON CONFLICT(session_id,student_id) DO UPDATE SET status=excluded.status
-                """,(sess_id, sid_s, rev[sl]))
+                    INSERT INTO Attendance(session_id,student_id,status,noted_by) VALUES(?,?,?,?)
+                    ON CONFLICT(session_id,student_id) DO UPDATE
+                        SET status=excluded.status, noted_by=excluded.noted_by
+                """,(sess_id, sid_s, rev[sl], noter))
             conn.commit()
 
         p =sum(1 for v in sels.values() if v=="出席")
@@ -683,7 +698,7 @@ def page_coach_leave_review():
                         with get_conn() as conn:
                             conn.execute(
                                 "UPDATE LeaveRequests SET status='approved',reviewed_by=?,reviewed_at=? WHERE id=?",
-                                (uid,datetime.now().isoformat(),int(row["id"]))); conn.commit()
+                                (uid,now_tw().isoformat(),int(row["id"]))); conn.commit()
                         st.success("已核准！"); st.rerun()
                 with col2:
                     rr=st.text_input("駁回原因",key=f"rr_{row['id']}",placeholder="請填寫駁回原因")
@@ -695,7 +710,7 @@ def page_coach_leave_review():
                                     UPDATE LeaveRequests
                                     SET status='rejected',reviewed_by=?,reviewed_at=?,reject_reason=?
                                     WHERE id=?
-                                """,(uid,datetime.now().isoformat(),rr,int(row["id"]))); conn.commit()
+                                """,(uid,now_tw().isoformat(),rr,int(row["id"]))); conn.commit()
                             st.success("已駁回。"); st.rerun()
     st.divider()
     st.markdown('<div class="section-title">📋 歷史審核紀錄</div>',unsafe_allow_html=True)
@@ -734,6 +749,131 @@ def _del_course_batch(del_ids):
             conn.execute("DELETE FROM Courses WHERE id=?",(cid,))
         conn.commit()
 
+
+
+# ══════════════════════════════════════════════════════════════
+# ✅  管理者課堂點名（v1.13 新增）
+# ══════════════════════════════════════════════════════════════
+def page_admin_attendance_mark():
+    st.markdown('<div class="page-title">✅ 管理者課堂點名</div>',unsafe_allow_html=True)
+    st.divider()
+
+    noter = st.session_state.get("profile_name","")  # 登入管理者姓名
+
+    # ── 選擇日期：今天 + 前 7 天（共 8 天），台灣時間 ───────────
+    wd_names = ["一","二","三","四","五","六","日"]
+    date_opts_admin = []
+    for i in range(8):
+        d = today_tw() - timedelta(days=i)
+        label = f"{d.isoformat()}（週{wd_names[d.weekday()]}）"
+        date_opts_admin.append((label, d))
+
+    sel_date_label = st.selectbox(
+        "選擇日期",
+        [o[0] for o in date_opts_admin],
+        key="adm_att_date")
+    sess_date = dict(date_opts_admin)[sel_date_label]
+
+    # ── 選擇課程：所有課程（不限星期）────────────────────────────
+    with get_conn() as conn:
+        courses = pd.read_sql_query("""
+            SELECT c.id, c.schedule_day, c.schedule_time, c.table_id,
+                   c.coach_id,
+                   COALESCE(c.course_code,'—')||'  '||c.course_type||'  '||
+                   c.schedule_day||'  '||c.schedule_time||'  （'||u.name||')'  AS label
+            FROM Courses c JOIN Users u ON c.coach_id=u.id
+            ORDER BY c.schedule_day, c.schedule_time
+        """, conn)
+
+    if courses.empty:
+        st.info("目前尚無課程，請先建立課程。"); return
+
+    cmap  = dict(zip(courses["label"], courses["id"]))
+    cinfo = courses.set_index("id")
+    sel   = st.selectbox("選擇課程", list(cmap.keys()), key="adm_att_course")
+    cid   = cmap[sel]; row = cinfo.loc[cid]
+
+    # ── 取得學員清單 ────────────────────────────────────────────
+    with get_conn() as conn:
+        stus = pd.read_sql_query("""
+            SELECT u.id, u.name FROM Enrollments e JOIN Users u ON e.student_id=u.id
+            WHERE e.course_id=? ORDER BY u.name
+        """, conn, params=(cid,))
+
+    if stus.empty:
+        st.warning("此課程尚無學員，無法點名。"); return
+
+    # ── 查詢現有 ClassSessions（只查，不自動建立）────────────────
+    with get_conn() as conn:
+        sess_row = conn.execute(
+            "SELECT id FROM ClassSessions WHERE course_id=? AND session_date=?",
+            (cid, sess_date.isoformat())).fetchone()
+        sess_id = sess_row["id"] if sess_row else None
+
+        existing = conn.execute(
+            "SELECT student_id,status FROM Attendance WHERE session_id=?",
+            (sess_id,)).fetchall() if sess_id else []
+
+        # 請假聯動：已核准請假 → 預設「請假」
+        approved = set(r["student_id"] for r in conn.execute("""
+            SELECT student_id FROM LeaveRequests
+            WHERE course_id=? AND leave_date=? AND status='approved'
+        """, (cid, sess_date.isoformat())).fetchall())
+
+    em  = {r["student_id"]: r["status"] for r in existing}
+    opts = ["出席","缺席","請假"]
+    rev  = {"出席":"present","缺席":"absent","請假":"leave"}
+    fwd  = {"present":"出席","absent":"缺席","leave":"請假"}
+
+    # ── 顯示點名完成通知 ─────────────────────────────────────────
+    if "adm_att_done_msg" in st.session_state:
+        st.success(st.session_state.pop("adm_att_done_msg"))
+
+    st.markdown(
+        f'<div class="section-title">👥 點名列表（共 {len(stus)} 位學員）</div>',
+        unsafe_allow_html=True)
+    st.caption(f"點名日期：{sess_date.isoformat()}（週{wd_names[sess_date.weekday()]}）　點名教練：{noter}")
+
+    sels = {}
+    for _, stu in stus.iterrows():
+        if stu["id"] in approved: dflt, sfx = "請假","　🏷️ 已核准請假"
+        else: dflt, sfx = fwd.get(em.get(stu["id"],"present"),"出席"),""
+        sels[stu["id"]] = st.radio(
+            f"**{stu['name']}**{sfx}", opts,
+            index=opts.index(dflt), horizontal=True,
+            key=f"adm_att_{cid}_{sess_date.isoformat()}_{stu['id']}")
+
+    if st.button("📝 送出點名結果", type="primary", use_container_width=True):
+        try:
+            with get_conn() as conn:
+                # 送出後才建立 ClassSessions（若尚未存在）
+                if sess_id is None:
+                    cur = conn.execute(
+                        "INSERT INTO ClassSessions"
+                        "(course_id,session_date,session_time,coach_id,table_id,created_by)"
+                        " VALUES(?,?,?,?,?,'admin_點名')",
+                        (cid, sess_date.isoformat(), str(row["schedule_time"]),
+                         int(row["coach_id"]), int(row["table_id"])))
+                    conn.commit(); sess_id = cur.lastrowid
+
+                # 寫入 Attendance（含 noted_by 管理者姓名）
+                for sid_s, sl in sels.items():
+                    conn.execute("""
+                        INSERT INTO Attendance(session_id,student_id,status,noted_by) VALUES(?,?,?,?)
+                        ON CONFLICT(session_id,student_id) DO UPDATE
+                            SET status=excluded.status, noted_by=excluded.noted_by
+                    """, (sess_id, sid_s, rev[sl], noter))
+                conn.commit()
+
+            p  = sum(1 for v in sels.values() if v=="出席")
+            a  = sum(1 for v in sels.values() if v=="缺席")
+            lv = sum(1 for v in sels.values() if v=="請假")
+            st.session_state["adm_att_done_msg"] = (
+                f"✅ 點名完成！課程：{sel}　日期：{sess_date.isoformat()}　"
+                f"出席：{p} 人　缺席：{a} 人　請假：{lv} 人　點名教練：{noter}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"點名失敗：{e}")
 
 def page_admin_courses():
     st.markdown('<div class="page-title">📅 課程管理</div>',unsafe_allow_html=True); st.divider()
@@ -902,12 +1042,12 @@ def page_admin_courses():
                     add_l  = st.number_input("課程總堂數",
                                              min_value=1, max_value=500, value=12, step=1, key="add_l",
                                              help="本次報名的總堂數，存入報名紀錄供日後查詢")
-                    add_sd = st.date_input("開始上課日期", value=date.today(), key="add_sd",
+                    add_sd = st.date_input("開始上課日期", value=today_tw(), key="add_sd",
                                            help="報名起算日，用於推算預計上課日期")
                     if st.button("➕ 加入報名", type="primary"):
                         try:
-                            now = datetime.now().isoformat()
-                            per = date.today().strftime("%Y-%m")
+                            now = now_tw().isoformat()
+                            per = today_tw().strftime("%Y-%m")
                             sid_add = smap[add_s]
                             with get_conn() as conn:
                                 # 判斷是否已有 Enrollments 紀錄（後續累加報名）
@@ -927,7 +1067,7 @@ def page_admin_courses():
                                         "(student_id,course_id,fee,enrolled_date,total_lessons,start_date)"
                                         " VALUES(?,?,?,?,?,?)",
                                         (sid_add, cid_e, add_f,
-                                         date.today().isoformat(), add_l, add_sd.isoformat()))
+                                         today_tw().isoformat(), add_l, add_sd.isoformat()))
                                 # 每次報名都新增一筆 Payments（以 created_at 區分先後）
                                 conn.execute(
                                     "INSERT INTO Payments"
@@ -956,7 +1096,7 @@ def page_admin_courses():
                 col_a,col_b=st.columns(2)
                 est_lessons=col_a.number_input("課程總堂數",min_value=1,max_value=500,value=12,step=1,key="est_lessons",
                                                help="輸入要推算的總堂數")
-                est_start=col_b.date_input("起始日期",value=date.today(),key="est_start",
+                est_start=col_b.date_input("起始日期",value=today_tw(),key="est_start",
                                            help="從哪天開始推算")
                 if st.button("🔍 推算預計上課日期",key="calc_schedule"):
                     result_dates=[]
@@ -1015,8 +1155,8 @@ def page_admin_courses():
 def page_admin_attendance():
     st.markdown('<div class="page-title">📊 出勤總表</div>',unsafe_allow_html=True); st.divider()
     ca,cb=st.columns(2)
-    sd=ca.date_input("起始日期",value=date.today()-timedelta(days=30))
-    ed=cb.date_input("結束日期",value=date.today())
+    sd=ca.date_input("起始日期",value=today_tw()-timedelta(days=30))
+    ed=cb.date_input("結束日期",value=today_tw())
     if sd>ed: st.error("起始日期不可晚於結束日期。"); return
     with get_conn() as conn:
         df=pd.read_sql_query("""
@@ -1091,8 +1231,8 @@ def page_admin_payments():
         for _,row in unpaid.iterrows():
             with st.expander(f"❌ {row['學員']} ｜ {row['課程類別']} {row['上課時間']} ｜ {row['期別']} ｜ NT$ {row['繳交費用']:,.0f}"):
                 m1,m2=st.columns(2)
-                pd_=m1.date_input("繳費日期",value=date.today(),key=f"pd_{row['id']}")
-                pt_=m2.time_input("繳費時間",value=datetime.now().time(),key=f"pt_{row['id']}")
+                pd_=m1.date_input("繳費日期",value=today_tw(),key=f"pd_{row['id']}")
+                pt_=m2.time_input("繳費時間",value=now_tw().time(),key=f"pt_{row['id']}")
                 if st.button("💳 標記為已繳費",key=f"pay_{row['id']}",type="primary"):
                     with get_conn() as conn:
                         conn.execute("UPDATE Payments SET is_paid=1,paid_date=?,paid_time=? WHERE id=?",
@@ -1152,8 +1292,8 @@ def page_admin_payments():
 def page_admin_reports():
     st.markdown('<div class="page-title">📈 報表查詢</div>',unsafe_allow_html=True); st.divider()
     ca,cb=st.columns(2)
-    sd=ca.date_input("起始日期",value=date.today().replace(day=1),key="rpt_sd")
-    ed=cb.date_input("結束日期",value=date.today(),key="rpt_ed")
+    sd=ca.date_input("起始日期",value=today_tw().replace(day=1),key="rpt_sd")
+    ed=cb.date_input("結束日期",value=today_tw(),key="rpt_ed")
     if sd>ed: st.error("起始日期不可晚於結束日期。"); return
 
     t1,t2,t3,t4,t5=st.tabs(["📅 課程報表","👥 出勤統計報表","💰 繳費統計報表",
@@ -1374,7 +1514,7 @@ def page_admin_reports():
                 for _,enr in df_enr.iterrows():
                     target_wd=WD.get(str(enr["星期"]),0)
                     # 推算未來 10 堂預計日期
-                    future_dates=[]; cursor=date.today()
+                    future_dates=[]; cursor=today_tw()
                     while len(future_dates)<10:
                         if cursor.weekday()==target_wd: future_dates.append(cursor)
                         cursor+=timedelta(days=1)
@@ -1730,6 +1870,7 @@ DB_COL_DESC = {
         "session_id": "場次 ID（對應 ClassSessions.id）",
         "student_id": "學員 ID（對應 Users.id，role=student）",
         "status":     "出勤狀態（present=出席 / absent=缺席 / leave=請假）",
+        "noted_by":   "點名教練姓名（v1.13：執行點名的登入帳號 name 欄位）",
         "note":       "備註說明（管理者自行填寫，例：補課安排）",
     },
     "LeaveRequests": {
@@ -1820,7 +1961,7 @@ def page_admin_db():
                         ws_memo.append(list(row))
 
             buf.seek(0)
-            filename = f"pingpong_export_{date.today().isoformat()}.xlsx"
+            filename = f"pingpong_export_{today_tw().isoformat()}.xlsx"
             st.download_button(
                 label=f"⬇️ 下載 {filename}",
                 data=buf,
@@ -1972,9 +2113,13 @@ def main():
                "✅ 課堂點名":page_coach_attendance,"🙏 請假審核":page_coach_leave_review,
                "📅 近期課程查詢":page_weekly_schedule}
     elif role=="admin":
-        pages={"📅 課程管理":page_admin_courses,"📊 出勤總表":page_admin_attendance,
-               "💰 繳費管理":page_admin_payments,"📈 報表查詢":page_admin_reports,
-               "🔑 帳號管理":page_admin_accounts,"📅 近期課程查詢":page_weekly_schedule,
+        pages={"🔑 帳號管理":page_admin_accounts,
+               "📅 課程管理":page_admin_courses,
+               "💰 繳費管理":page_admin_payments,
+               "✅ 管理者課堂點名":page_admin_attendance_mark,
+               "📊 出勤總表":page_admin_attendance,
+               "📈 報表查詢":page_admin_reports,
+               "📅 近期課程查詢":page_weekly_schedule,
                "💾 資料庫管理":page_admin_db}
     else:
         st.error("未知角色，請重新登入。"); return
