@@ -1,6 +1,6 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.14 |  Tab5 歷史列展開編輯出勤/備註 + 單筆刪除
+# 規格版本：v1.15 |  管理者點名日期過濾/Tab5去重複/課程分組
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
@@ -288,7 +288,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.14</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.15</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -769,12 +769,13 @@ def page_admin_attendance_mark():
         date_opts_admin.append((label, d))
 
     sel_date_label = st.selectbox(
-        "選擇日期",
+        "日期",
         [o[0] for o in date_opts_admin],
         key="adm_att_date")
     sess_date = dict(date_opts_admin)[sel_date_label]
 
-    # ── 選擇課程：所有課程（不限星期）────────────────────────────
+    # ── 課程：依選定日期的星期自動篩選（v1.15）────────────────────
+    sel_wd_label = f"週{wd_names[sess_date.weekday()]}"   # 例：週五
     with get_conn() as conn:
         courses = pd.read_sql_query("""
             SELECT c.id, c.schedule_day, c.schedule_time, c.table_id,
@@ -782,15 +783,16 @@ def page_admin_attendance_mark():
                    COALESCE(c.course_code,'—')||'  '||c.course_type||'  '||
                    c.schedule_day||'  '||c.schedule_time||'  （'||u.name||')'  AS label
             FROM Courses c JOIN Users u ON c.coach_id=u.id
-            ORDER BY c.schedule_day, c.schedule_time
-        """, conn)
+            WHERE c.schedule_day=?
+            ORDER BY c.schedule_time
+        """, conn, params=(sel_wd_label,))
 
     if courses.empty:
-        st.info("目前尚無課程，請先建立課程。"); return
+        st.info(f"所選日期（{sel_wd_label}）無排定課程。"); return
 
     cmap  = dict(zip(courses["label"], courses["id"]))
     cinfo = courses.set_index("id")
-    sel   = st.selectbox("選擇課程", list(cmap.keys()), key="adm_att_course")
+    sel   = st.selectbox("課程", list(cmap.keys()), key="adm_att_course")
     cid   = cmap[sel]; row = cinfo.loc[cid]
 
     # ── 取得學員清單 ────────────────────────────────────────────
@@ -1454,7 +1456,8 @@ def page_admin_reports():
             q_enr="""SELECT e.student_id, us.name AS 學員, c.id AS course_id,
                        COALESCE(c.course_code,'—') AS 課程ID, c.course_type AS 課程類型,
                        c.schedule_day AS 星期, c.schedule_time AS 上課時間,
-                       uc.name AS 教練
+                       uc.name AS 教練,
+                       COALESCE(e.enrolled_date,'') AS enrolled_date
                 FROM Enrollments e JOIN Courses c ON e.course_id=c.id
                 JOIN Users us ON e.student_id=us.id
                 JOIN Users uc ON c.coach_id=uc.id"""
@@ -1489,62 +1492,89 @@ def page_admin_reports():
             st.markdown('<div class="section-title">📋 上課規劃與執行表</div>',unsafe_allow_html=True)
             st.caption("歷史上課紀錄（有出勤狀況）與預計上課日期（出勤狀況空白）合併顯示，依日期由新到舊排列。備註說明僅歷史紀錄可編輯儲存。")
 
-            combined_rows=[]
+            # ── STEP 1：建立歷史上課列索引（session_id + student_id + 課程ID + 日期）
+            # 用於 STEP 2 排除已點名日期（需求2：避免重複列）
+            history_keys = set()   # (課程ID字串, 學員id字串, 日期字串)
+            combined_rows = []
 
-            # ── STEP 1：加入歷史上課列（有 Attendance 紀錄）────────────
             if not dfa_all.empty:
                 for _,row in dfa_all.iterrows():
+                    history_keys.add((
+                        str(row["課程ID"]),
+                        str(int(row["_student_id"])),
+                        str(row["上課日期"])
+                    ))
                     combined_rows.append({
-                        "_type":       "history",
-                        "_session_id": int(row["session_id"]),
-                        "_student_id": int(row["_student_id"]),
-                        "上課日期":    str(row["上課日期"]),
-                        "課程ID":      row["課程ID"],
-                        "學員":        row["學員"],
-                        "課程類型":    row["課程類型"],
-                        "教練":        row["教練"],
-                        "出勤狀況":    {"present":"✅ 出席","absent":"❌ 缺席","leave":"🟡 請假"}.get(row["_st"],""),
-                        "繳費通知":    "",
-                        "備註說明":    row["備註說明"],
+                        "_type":         "history",
+                        "_session_id":   int(row["session_id"]),
+                        "_student_id":   int(row["_student_id"]),
+                        "_course_id":    str(row["課程ID"]),
+                        "_enroll_date":  "",   # 歷史列用不到，保留欄位統一結構
+                        "上課日期":      str(row["上課日期"]),
+                        "課程ID":        row["課程ID"],
+                        "學員":          row["學員"],
+                        "課程類型":      row["課程類型"],
+                        "教練":          row["教練"],
+                        "出勤狀況":      {"present":"✅ 出席","absent":"❌ 缺席","leave":"🟡 請假"}.get(row["_st"],""),
+                        "繳費通知":      "",
+                        "備註說明":      row["備註說明"],
                     })
 
-            # ── STEP 2：加入預計上課列，並判斷繳費通知（≤ 3 堂觸發）──
-            notice_info=[]   # 收集需顯示 st.warning 的課程資訊
+            # ── STEP 2：加入預計上課列，排除已點名日期（需求2），判斷繳費通知 ──
+            notice_info = []
             if not df_enr.empty:
                 for _,enr in df_enr.iterrows():
-                    target_wd=WD.get(str(enr["星期"]),0)
-                    # 推算未來 10 堂預計日期
-                    future_dates=[]; cursor=today_tw()
-                    while len(future_dates)<10:
-                        if cursor.weekday()==target_wd: future_dates.append(cursor)
-                        cursor+=timedelta(days=1)
+                    target_wd = WD.get(str(enr["星期"]), 0)
+                    # 推算未來 10 堂預計日期，排除已有 Attendance 紀錄的日期（需求2）
+                    future_dates = []; cursor = today_tw()
+                    while len(future_dates) < 10:
+                        if cursor.weekday() == target_wd:
+                            date_str = cursor.strftime("%Y-%m-%d")
+                            key = (str(enr["課程ID"]), str(int(enr["student_id"])), date_str)
+                            if key not in history_keys:   # ← 需求2：跳過已點名日期
+                                future_dates.append(cursor)
+                        cursor += timedelta(days=1)
                     # 繳費通知觸發：預計剩餘堂數 ≤ 3
-                    need_notice=(len(future_dates)<=3)
+                    need_notice = (len(future_dates) <= 3)
                     if need_notice:
                         notice_info.append(
                             f"- {enr['學員']} ｜ {enr['課程ID']} {enr['課程類型']} {enr['星期']} {enr['上課時間']}"
                         )
-                    for i,fd in enumerate(future_dates):
-                        # 只在最近一筆（距今最近，降冪排序後會排在預計列最下方）標記
-                        is_nearest=(i==len(future_dates)-1)
+                    for i, fd in enumerate(future_dates):
+                        is_nearest = (i == len(future_dates) - 1)
                         combined_rows.append({
-                            "_type":       "future",
-                            "_session_id": None,
-                            "_student_id": int(enr["student_id"]),
-                            "上課日期":    fd.strftime("%Y-%m-%d"),
-                            "課程ID":      enr["課程ID"],
-                            "學員":        enr["學員"],
-                            "課程類型":    enr["課程類型"],
-                            "教練":        enr["教練"],
-                            "出勤狀況":    "",          # 預計上課，尚未點名
-                            "繳費通知":    "🔔 通知繳費" if (need_notice and is_nearest) else "",
-                            "備註說明":    "",          # 預計上課不可編輯備註
+                            "_type":         "future",
+                            "_session_id":   None,
+                            "_student_id":   int(enr["student_id"]),
+                            "_course_id":    str(enr["課程ID"]),
+                            "_enroll_date":  str(enr.get("enrolled_date", "")),
+                            "上課日期":      fd.strftime("%Y-%m-%d"),
+                            "課程ID":        enr["課程ID"],
+                            "學員":          enr["學員"],
+                            "課程類型":      enr["課程類型"],
+                            "教練":          enr["教練"],
+                            "出勤狀況":      "",
+                            "繳費通知":      "🔔 通知繳費" if (need_notice and is_nearest) else "",
+                            "備註說明":      "",
                         })
 
-            # ── STEP 3：依上課日期降冪排序────────────────────────────
+            # ── STEP 3：依課程分組（需求3），組間依報名日期排序，組內依上課日期降冪 ──
             if combined_rows:
-                df_combined=pd.DataFrame(combined_rows)
-                df_combined=df_combined.sort_values("上課日期",ascending=False).reset_index(drop=True)
+                df_combined = pd.DataFrame(combined_rows)
+
+                # 建立課程組排序鍵：取每課程的 enrolled_date（最早報名日期）
+                # 歷史列沒有 _enroll_date，從 df_enr 補齊
+                enr_date_map = {}   # 課程ID → enrolled_date
+                if not df_enr.empty and "enrolled_date" in df_enr.columns:
+                    for _,r in df_enr.iterrows():
+                        cid_k = str(r["課程ID"])
+                        ed    = str(r.get("enrolled_date",""))
+                        if cid_k not in enr_date_map or ed < enr_date_map[cid_k]:
+                            enr_date_map[cid_k] = ed
+
+                # 取得所有課程組，依報名日期升冪排列（需求3：方式C）
+                all_course_ids = list(dict.fromkeys(df_combined["課程ID"].tolist()))
+                all_course_ids.sort(key=lambda c: enr_date_map.get(c, "9999-99-99"))
 
                 # 繳費通知警示（頁面頂部 warning）
                 if notice_info:
@@ -1553,8 +1583,8 @@ def page_admin_reports():
                         "\n".join(notice_info)
                     )
 
-                # ── STEP 4：逐列顯示（歷史列含編輯/刪除，預計列唯讀）──
-                # CSV 匯出
+                # ── STEP 4：依課程分組逐列顯示（需求3），組內日期降冪，已排除重複（需求2）──
+                # CSV 匯出（合併所有課程）
                 disp_cols=["上課日期","課程ID","學員","課程類型","教練","出勤狀況","繳費通知","備註說明"]
                 if not is_all_s: disp_cols.remove("學員")
                 st.download_button(
@@ -1571,99 +1601,110 @@ def page_admin_reports():
                     if msg_type == "success": st.success(msg_text)
                     else: st.error(msg_text)
 
-                # 欄位標題列
                 att_opts  = ["出席","缺席","請假"]
                 att_rev   = {"出席":"present","缺席":"absent","請假":"leave"}
-                att_label = {"present":"✅ 出席","absent":"❌ 缺席","leave":"🟡 請假"}
 
-                # 顯示每一列
-                for row_idx, row in df_combined.iterrows():
-                    is_hist = (row["_type"] == "history")
-                    sess_id = row["_session_id"]
-                    stu_id  = row["_student_id"]
+                # 依課程分組顯示（需求3：方式C，組間依報名日期排序）
+                for grp_cid in all_course_ids:
+                    grp_df = df_combined[df_combined["課程ID"] == grp_cid].copy()
+                    grp_df = grp_df.sort_values("上課日期", ascending=False).reset_index(drop=True)
+                    if grp_df.empty: continue
 
-                    # 標題列：日期 + 課程 + 學員（全部時）+ 出勤狀況 + 繳費通知 + 備註摘要
-                    col_info, col_act = st.columns([5, 1])
-                    with col_info:
-                        tag     = "🟢" if is_hist else "🔵"
-                        std_str = f" ｜ {row['學員']}" if is_all_s else ""
-                        note_str= f" ｜ 📝 {row['備註說明']}" if row["備註說明"] else ""
-                        notice_str = f" ｜ {row['繳費通知']}" if row["繳費通知"] else ""
-                        st.markdown(
-                            f"{tag} **{row['上課日期']}** ｜ {row['課程ID']} {row['課程類型']}"
-                            f"{std_str} ｜ {row['教練']} ｜ "
-                            f"{row['出勤狀況'] or '（預計上課）'}"
-                            f"{notice_str}{note_str}"
-                        )
-                    with col_act:
+                    # 課程群組標題
+                    first = grp_df.iloc[0]
+                    st.markdown(
+                        f'<div class="section-title">▌ {first["課程ID"]}　'
+                        f'{first["課程類型"]}　{first["教練"]}</div>',
+                        unsafe_allow_html=True)
+
+                    # 顯示每一列
+                    for row_idx, row in grp_df.iterrows():
+                        is_hist = (row["_type"] == "history")
+                        sess_id = row["_session_id"]
+                        stu_id  = row["_student_id"]
+
+                        # 標題列：日期 + 課程 + 學員（全部時）+ 出勤狀況 + 繳費通知 + 備註摘要
+                        col_info, col_act = st.columns([5, 1])
+                        with col_info:
+                            tag     = "🟢" if is_hist else "🔵"
+                            std_str = f" ｜ {row['學員']}" if is_all_s else ""
+                            note_str= f" ｜ 📝 {row['備註說明']}" if row["備註說明"] else ""
+                            notice_str = f" ｜ {row['繳費通知']}" if row["繳費通知"] else ""
+                            st.markdown(
+                                f"{tag} **{row['上課日期']}** ｜ {row['課程ID']} {row['課程類型']}"
+                                f"{std_str} ｜ {row['教練']} ｜ "
+                                f"{row['出勤狀況'] or '（預計上課）'}"
+                                f"{notice_str}{note_str}"
+                            )
+                        with col_act:
+                            if is_hist:
+                                if st.button("✏️ 編輯", key=f"edit_{row_idx}", use_container_width=True):
+                                    # 切換展開狀態
+                                    toggle_key = f"expand_{sess_id}_{stu_id}"
+                                    st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
+                                    st.rerun()
+
+                        # 歷史列展開編輯區
                         if is_hist:
-                            if st.button("✏️ 編輯", key=f"edit_{row_idx}", use_container_width=True):
-                                # 切換展開狀態
-                                toggle_key = f"expand_{sess_id}_{stu_id}"
-                                st.session_state[toggle_key] = not st.session_state.get(toggle_key, False)
-                                st.rerun()
+                            expand_key = f"expand_{sess_id}_{stu_id}"
+                            if st.session_state.get(expand_key, False):
+                                with st.container(border=True):
+                                    cur_status = {"present":"出席","absent":"缺席","leave":"請假"}.get(
+                                        dfa_all[
+                                            (dfa_all["session_id"]==sess_id) &
+                                            (dfa_all["_student_id"]==stu_id)
+                                        ]["_st"].values[0] if len(dfa_all[
+                                            (dfa_all["session_id"]==sess_id) &
+                                            (dfa_all["_student_id"]==stu_id)
+                                        ]) > 0 else "", "出席")
+                                    cur_note = row["備註說明"]
 
-                    # 歷史列展開編輯區
-                    if is_hist:
-                        expand_key = f"expand_{sess_id}_{stu_id}"
-                        if st.session_state.get(expand_key, False):
-                            with st.container(border=True):
-                                cur_status = {"present":"出席","absent":"缺席","leave":"請假"}.get(
-                                    dfa_all[
-                                        (dfa_all["session_id"]==sess_id) &
-                                        (dfa_all["_student_id"]==stu_id)
-                                    ]["_st"].values[0] if len(dfa_all[
-                                        (dfa_all["session_id"]==sess_id) &
-                                        (dfa_all["_student_id"]==stu_id)
-                                    ]) > 0 else "", "出席")
-                                cur_note = row["備註說明"]
+                                    ea, eb = st.columns(2)
+                                    new_status = ea.selectbox(
+                                        "出勤狀況",
+                                        att_opts,
+                                        index=att_opts.index(cur_status),
+                                        key=f"sel_status_{row_idx}")
+                                    new_note = eb.text_input(
+                                        "備註說明",
+                                        value=cur_note,
+                                        key=f"txt_note_{row_idx}",
+                                        placeholder="補課安排、備注等")
 
-                                ea, eb = st.columns(2)
-                                new_status = ea.selectbox(
-                                    "出勤狀況",
-                                    att_opts,
-                                    index=att_opts.index(cur_status),
-                                    key=f"sel_status_{row_idx}")
-                                new_note = eb.text_input(
-                                    "備註說明",
-                                    value=cur_note,
-                                    key=f"txt_note_{row_idx}",
-                                    placeholder="補課安排、備注等")
-
-                                ec, ed, _ = st.columns([1, 1, 3])
-                                if ec.button("💾 儲存", key=f"save_{row_idx}", type="primary"):
-                                    try:
-                                        with get_conn() as conn:
-                                            conn.execute(
-                                                "UPDATE Attendance SET status=?, note=? "
-                                                "WHERE session_id=? AND student_id=?",
-                                                (att_rev[new_status], new_note.strip(),
-                                                 int(sess_id), int(stu_id)))
-                                            conn.commit()
-                                        st.session_state[expand_key] = False
-                                        st.session_state["plan_msg"] = ("success",
-                                            f"✅ 已更新：{row['上課日期']} {row['課程ID']} 的出勤狀況與備註。")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.session_state["plan_msg"] = ("error", f"儲存失敗：{e}")
-                                        st.rerun()
-                                if ed.button("🗑️ 刪除此筆", key=f"del_{row_idx}"):
-                                    try:
-                                        with get_conn() as conn:
-                                            conn.execute(
-                                                "DELETE FROM Attendance "
-                                                "WHERE session_id=? AND student_id=?",
-                                                (int(sess_id), int(stu_id)))
-                                            conn.commit()
-                                        st.session_state[expand_key] = False
-                                        st.session_state["plan_msg"] = ("success",
-                                            f"✅ 已刪除：{row['上課日期']} {row['課程ID']} "
-                                            f"{row['學員']} 的出勤紀錄。")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.session_state["plan_msg"] = ("error", f"刪除失敗：{e}")
-                                        st.rerun()
-                                if _: pass  # 空欄佔位
+                                    ec, ed, _ = st.columns([1, 1, 3])
+                                    if ec.button("💾 儲存", key=f"save_{row_idx}", type="primary"):
+                                        try:
+                                            with get_conn() as conn:
+                                                conn.execute(
+                                                    "UPDATE Attendance SET status=?, note=? "
+                                                    "WHERE session_id=? AND student_id=?",
+                                                    (att_rev[new_status], new_note.strip(),
+                                                     int(sess_id), int(stu_id)))
+                                                conn.commit()
+                                            st.session_state[expand_key] = False
+                                            st.session_state["plan_msg"] = ("success",
+                                                f"✅ 已更新：{row['上課日期']} {row['課程ID']} 的出勤狀況與備註。")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.session_state["plan_msg"] = ("error", f"儲存失敗：{e}")
+                                            st.rerun()
+                                    if ed.button("🗑️ 刪除此筆", key=f"del_{row_idx}"):
+                                        try:
+                                            with get_conn() as conn:
+                                                conn.execute(
+                                                    "DELETE FROM Attendance "
+                                                    "WHERE session_id=? AND student_id=?",
+                                                    (int(sess_id), int(stu_id)))
+                                                conn.commit()
+                                            st.session_state[expand_key] = False
+                                            st.session_state["plan_msg"] = ("success",
+                                                f"✅ 已刪除：{row['上課日期']} {row['課程ID']} "
+                                                f"{row['學員']} 的出勤紀錄。")
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.session_state["plan_msg"] = ("error", f"刪除失敗：{e}")
+                                            st.rerun()
+                                    if _: pass  # 空欄佔位
 
             else:
                 st.info("目前無上課紀錄與報名課程資料。")
