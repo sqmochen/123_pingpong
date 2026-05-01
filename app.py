@@ -1,6 +1,6 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.16 |  管理者點名新增天數輸入動態擴展日期選單
+# 規格版本：v1.17 |  預計日期固定推算(start_date+total_lessons)/報名預設值調整
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
@@ -288,7 +288,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.16</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.17</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -1058,9 +1058,9 @@ def page_admin_courses():
                 if notenr:
                     add_s  = st.selectbox("選擇學員", notenr, key="add_s")
                     add_f  = st.number_input("費用（元）整期總費用",
-                                             min_value=0, value=2000, step=100, key="add_f")
+                                             min_value=0, value=8000, step=100, key="add_f")
                     add_l  = st.number_input("課程總堂數",
-                                             min_value=1, max_value=500, value=12, step=1, key="add_l",
+                                             min_value=1, max_value=500, value=10, step=1, key="add_l",
                                              help="本次報名的總堂數，存入報名紀錄供日後查詢")
                     add_sd = st.date_input("開始上課日期", value=today_tw(), key="add_sd",
                                            help="報名起算日，用於推算預計上課日期")
@@ -1475,7 +1475,9 @@ def page_admin_reports():
                        COALESCE(c.course_code,'—') AS 課程ID, c.course_type AS 課程類型,
                        c.schedule_day AS 星期, c.schedule_time AS 上課時間,
                        uc.name AS 教練,
-                       COALESCE(e.enrolled_date,'') AS enrolled_date
+                       COALESCE(e.enrolled_date,'') AS enrolled_date,
+                       COALESCE(e.total_lessons,10)  AS total_lessons,
+                       COALESCE(e.start_date,'')     AS start_date
                 FROM Enrollments e JOIN Courses c ON e.course_id=c.id
                 JOIN Users us ON e.student_id=us.id
                 JOIN Users uc ON c.coach_id=uc.id"""
@@ -1538,20 +1540,43 @@ def page_admin_reports():
                         "備註說明":      row["備註說明"],
                     })
 
-            # ── STEP 2：加入預計上課列，排除已點名日期（需求2），判斷繳費通知 ──
+            # ── STEP 2：依 start_date + total_lessons 固定推算預計上課日期（v1.17）──
+            # 不再從「今天」動態推算，改為從報名的開始日期推算固定堂數
+            # 確保點名後預計日期總數不變（點名只改狀態，不新增日期）
             notice_info = []
             if not df_enr.empty:
                 for _,enr in df_enr.iterrows():
-                    target_wd = WD.get(str(enr["星期"]), 0)
-                    # 推算未來 10 堂預計日期，排除已有 Attendance 紀錄的日期（需求2）
-                    future_dates = []; cursor = today_tw()
-                    while len(future_dates) < 10:
-                        if cursor.weekday() == target_wd:
-                            date_str = cursor.strftime("%Y-%m-%d")
-                            key = (str(enr["課程ID"]), str(int(enr["student_id"])), date_str)
-                            if key not in history_keys:   # ← 需求2：跳過已點名日期
-                                future_dates.append(cursor)
-                        cursor += timedelta(days=1)
+                    target_wd    = WD.get(str(enr["星期"]), 0)
+                    total_ls     = int(enr["total_lessons"]) if enr.get("total_lessons") else 10
+                    start_dt_str = str(enr.get("start_date","")) if enr.get("start_date") else ""
+
+                    # 以 start_date 為起點推算所有課程日期（固定 total_lessons 堂）
+                    if start_dt_str:
+                        try:
+                            from datetime import date as _date
+                            sy, sm, sd = start_dt_str.split("-")
+                            cursor = _date(int(sy), int(sm), int(sd))
+                        except Exception:
+                            cursor = today_tw()
+                    else:
+                        cursor = today_tw()
+
+                    # 從 start_date 往後推算所有上課日期（共 total_lessons 堂）
+                    all_lesson_dates = []
+                    tmp = cursor
+                    while len(all_lesson_dates) < total_ls:
+                        if tmp.weekday() == target_wd:
+                            all_lesson_dates.append(tmp)
+                        tmp += timedelta(days=1)
+
+                    # 只取「尚未有 Attendance 紀錄」的日期作為預計上課列（需求2：排除已點名日期）
+                    future_dates = []
+                    for fd in all_lesson_dates:
+                        date_str = fd.strftime("%Y-%m-%d")
+                        key = (str(enr["課程ID"]), str(int(enr["student_id"])), date_str)
+                        if key not in history_keys:
+                            future_dates.append(fd)
+
                     # 繳費通知觸發：預計剩餘堂數 ≤ 3
                     need_notice = (len(future_dates) <= 3)
                     if need_notice:
