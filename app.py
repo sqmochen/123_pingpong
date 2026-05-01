@@ -1,6 +1,6 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.17 |  預計日期固定推算(start_date+total_lessons)/報名預設值調整
+# 規格版本：v1.19 |  移除機制三繳費通知/notify_date條件>=3
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
@@ -138,6 +138,7 @@ def init_db():
             enrolled_date TEXT NOT NULL,
             total_lessons INTEGER DEFAULT NULL,   -- v1.9：本次報名總堂數
             start_date    TEXT DEFAULT NULL,      -- v1.9：開始上課日期（YYYY-MM-DD）
+            notify_date   TEXT DEFAULT NULL,      -- v1.18：繳費提醒日期（倒數第三堂，YYYY-MM-DD）
             UNIQUE(student_id, course_id),
             FOREIGN KEY(student_id) REFERENCES Users(id),
             FOREIGN KEY(course_id)  REFERENCES Courses(id));
@@ -226,6 +227,8 @@ def init_db():
             # v1.12：MemoPad 新增資料表（透過 CREATE TABLE IF NOT EXISTS 處理，無需 ALTER）
             # v1.13：Attendance 新增點名教練欄位
             "ALTER TABLE Attendance    ADD COLUMN noted_by      TEXT DEFAULT ''",
+            # v1.18：Enrollments 新增繳費提醒日期欄位
+            "ALTER TABLE Enrollments   ADD COLUMN notify_date   TEXT DEFAULT NULL",
         ]:
             try: cur.execute(sql)
             except: pass
@@ -288,7 +291,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.17</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.19</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -1069,25 +1072,45 @@ def page_admin_courses():
                             now = now_tw().isoformat()
                             per = today_tw().strftime("%Y-%m")
                             sid_add = smap[add_s]
+
+                            # ── 計算繳費提醒日期（v1.18）──────────────────────────
+                            # 從 start_date 推算所有上課日期，取倒數第三堂（從最後往前數第3堂）
+                            with get_conn() as conn_c:
+                                crs_wd_row = conn_c.execute(
+                                    "SELECT schedule_day FROM Courses WHERE id=?", (cid_e,)).fetchone()
+                            crs_wd = WD.get(str(crs_wd_row["schedule_day"]), 0) if crs_wd_row else 0
+                            notify_dt = None
+                            if int(add_l) >= 3:
+                                # 從報名起始日推算 add_l 堂上課日期
+                                lesson_dates = []
+                                tmp_cursor = add_sd
+                                while len(lesson_dates) < int(add_l):
+                                    if tmp_cursor.weekday() == crs_wd:
+                                        lesson_dates.append(tmp_cursor)
+                                    tmp_cursor += timedelta(days=1)
+                                # 倒數第三堂 = 從最後往前數第 3 堂（索引 -3）
+                                # v1.19：所有堂數 >= 3 皆計算 notify_date（原 >= 3 不變，語義修正）
+                                notify_dt = lesson_dates[-3].isoformat()
+
                             with get_conn() as conn:
                                 # 判斷是否已有 Enrollments 紀錄（後續累加報名）
                                 existing = conn.execute(
                                     "SELECT id FROM Enrollments WHERE student_id=? AND course_id=?",
                                     (sid_add, cid_e)).fetchone()
                                 if existing:
-                                    # 後續報名：更新 fee、total_lessons、start_date
+                                    # 後續報名：更新 fee、total_lessons、start_date、notify_date
                                     conn.execute(
-                                        "UPDATE Enrollments SET fee=?, total_lessons=?, start_date=? "
+                                        "UPDATE Enrollments SET fee=?, total_lessons=?, start_date=?, notify_date=? "
                                         "WHERE student_id=? AND course_id=?",
-                                        (add_f, add_l, add_sd.isoformat(), sid_add, cid_e))
+                                        (add_f, add_l, add_sd.isoformat(), notify_dt, sid_add, cid_e))
                                 else:
-                                    # 第一次報名：新增 Enrollments
+                                    # 第一次報名：新增 Enrollments（含 notify_date）
                                     conn.execute(
                                         "INSERT INTO Enrollments"
-                                        "(student_id,course_id,fee,enrolled_date,total_lessons,start_date)"
-                                        " VALUES(?,?,?,?,?,?)",
+                                        "(student_id,course_id,fee,enrolled_date,total_lessons,start_date,notify_date)"
+                                        " VALUES(?,?,?,?,?,?,?)",
                                         (sid_add, cid_e, add_f,
-                                         today_tw().isoformat(), add_l, add_sd.isoformat()))
+                                         today_tw().isoformat(), add_l, add_sd.isoformat(), notify_dt))
                                 # 每次報名都新增一筆 Payments（以 created_at 區分先後）
                                 conn.execute(
                                     "INSERT INTO Payments"
@@ -1095,10 +1118,11 @@ def page_admin_courses():
                                     " VALUES(?,?,?,?,?)",
                                     (sid_add, cid_e, add_f, per, now))
                                 conn.commit()
+                            notify_str = f"，繳費提醒日：{notify_dt}" if notify_dt else ""
                             st.success(
                                 f"✅ {add_s} 報名成功！"
                                 f"費用 NT$ {add_f:,}，共 {add_l} 堂，"
-                                f"開始日：{add_sd.isoformat()}")
+                                f"開始日：{add_sd.isoformat()}{notify_str}")
                             st.rerun()
                         except Exception as e:
                             st.error(f"報名失敗：{e}")
@@ -1477,7 +1501,8 @@ def page_admin_reports():
                        uc.name AS 教練,
                        COALESCE(e.enrolled_date,'') AS enrolled_date,
                        COALESCE(e.total_lessons,10)  AS total_lessons,
-                       COALESCE(e.start_date,'')     AS start_date
+                       COALESCE(e.start_date,'')     AS start_date,
+                       COALESCE(e.notify_date,'')    AS notify_date
                 FROM Enrollments e JOIN Courses c ON e.course_id=c.id
                 JOIN Users us ON e.student_id=us.id
                 JOIN Users uc ON c.coach_id=uc.id"""
@@ -1536,14 +1561,13 @@ def page_admin_reports():
                         "課程類型":      row["課程類型"],
                         "教練":          row["教練"],
                         "出勤狀況":      {"present":"✅ 出席","absent":"❌ 缺席","leave":"🟡 請假"}.get(row["_st"],""),
-                        "繳費通知":      "",
                         "備註說明":      row["備註說明"],
                     })
 
             # ── STEP 2：依 start_date + total_lessons 固定推算預計上課日期（v1.17）──
             # 不再從「今天」動態推算，改為從報名的開始日期推算固定堂數
             # 確保點名後預計日期總數不變（點名只改狀態，不新增日期）
-            notice_info = []
+            # ── STEP 2：依 start_date + total_lessons 固定推算預計上課日期 ──
             if not df_enr.empty:
                 for _,enr in df_enr.iterrows():
                     target_wd    = WD.get(str(enr["星期"]), 0)
@@ -1569,7 +1593,7 @@ def page_admin_reports():
                             all_lesson_dates.append(tmp)
                         tmp += timedelta(days=1)
 
-                    # 只取「尚未有 Attendance 紀錄」的日期作為預計上課列（需求2：排除已點名日期）
+                    # 只取「尚未有 Attendance 紀錄」的日期作為預計上課列（排除已點名日期）
                     future_dates = []
                     for fd in all_lesson_dates:
                         date_str = fd.strftime("%Y-%m-%d")
@@ -1577,14 +1601,7 @@ def page_admin_reports():
                         if key not in history_keys:
                             future_dates.append(fd)
 
-                    # 繳費通知觸發：預計剩餘堂數 ≤ 3
-                    need_notice = (len(future_dates) <= 3)
-                    if need_notice:
-                        notice_info.append(
-                            f"- {enr['學員']} ｜ {enr['課程ID']} {enr['課程類型']} {enr['星期']} {enr['上課時間']}"
-                        )
-                    for i, fd in enumerate(future_dates):
-                        is_nearest = (i == len(future_dates) - 1)
+                    for fd in future_dates:
                         combined_rows.append({
                             "_type":         "future",
                             "_session_id":   None,
@@ -1597,7 +1614,6 @@ def page_admin_reports():
                             "課程類型":      enr["課程類型"],
                             "教練":          enr["教練"],
                             "出勤狀況":      "",
-                            "繳費通知":      "🔔 通知繳費" if (need_notice and is_nearest) else "",
                             "備註說明":      "",
                         })
 
@@ -1619,16 +1635,28 @@ def page_admin_reports():
                 all_course_ids = list(dict.fromkeys(df_combined["課程ID"].tolist()))
                 all_course_ids.sort(key=lambda c: enr_date_map.get(c, "9999-99-99"))
 
-                # 繳費通知警示（頁面頂部 warning）
-                if notice_info:
+                # ── 繳費通知警示（v1.18：改從 notify_date 判斷 7 天內）────
+                # 查詢今天起 7 天內有 notify_date 的學員課程
+                today_str     = today_tw().isoformat()
+                week_end_str  = (today_tw() + timedelta(days=7)).isoformat()
+                db_notice_info = []
+                if not df_enr.empty:
+                    for _, enr_n in df_enr.iterrows():
+                        nd = str(enr_n.get("notify_date",""))
+                        if nd and today_str <= nd <= week_end_str:
+                            db_notice_info.append(
+                                f"- {enr_n['學員']} ｜ {enr_n['課程ID']} "
+                                f"{enr_n['課程類型']} {enr_n['星期']} {enr_n['上課時間']}　"
+                                f"繳費提醒日：{nd}"
+                            )
+                if db_notice_info:
                     st.warning(
-                        "🔔 **繳費通知**：以下課程預計上課堂數 ≤ 3 堂，請提醒學員續費：\n\n"+
-                        "\n".join(notice_info)
+                        "🔔 **繳費通知**：以下學員將於 7 天內到達繳費提醒日期，請提醒續費：\n\n"+
+                        "\n".join(db_notice_info)
                     )
-
                 # ── STEP 4：依課程分組逐列顯示（需求3），組內日期降冪，已排除重複（需求2）──
                 # CSV 匯出（合併所有課程）
-                disp_cols=["上課日期","課程ID","學員","課程類型","教練","出勤狀況","繳費通知","備註說明"]
+                disp_cols=["上課日期","課程ID","學員","課程類型","教練","出勤狀況","備註說明"]
                 if not is_all_s: disp_cols.remove("學員")
                 st.download_button(
                     "⬇️ 匯出上課規劃與執行表 CSV",
@@ -1672,12 +1700,11 @@ def page_admin_reports():
                             tag     = "🟢" if is_hist else "🔵"
                             std_str = f" ｜ {row['學員']}" if is_all_s else ""
                             note_str= f" ｜ 📝 {row['備註說明']}" if row["備註說明"] else ""
-                            notice_str = f" ｜ {row['繳費通知']}" if row["繳費通知"] else ""
                             st.markdown(
                                 f"{tag} **{row['上課日期']}** ｜ {row['課程ID']} {row['課程類型']}"
                                 f"{std_str} ｜ {row['教練']} ｜ "
                                 f"{row['出勤狀況'] or '（預計上課）'}"
-                                f"{notice_str}{note_str}"
+                                f"{note_str}"
                             )
                         with col_act:
                             if is_hist:
@@ -2000,6 +2027,7 @@ DB_COL_DESC = {
         "enrolled_date": "報名日期（YYYY-MM-DD）",
         "total_lessons": "本次報名課程總堂數",
         "start_date":    "開始上課日期（YYYY-MM-DD）",
+        "notify_date":   "繳費提醒日期（v1.18：倒數第三堂課的上課日期，YYYY-MM-DD）",
     },
     "ClassSessions": {
         "id":           "場次唯一識別碼（自動遞增主鍵）",
