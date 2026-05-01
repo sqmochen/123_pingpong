@@ -1,6 +1,6 @@
 # ============================================================
 # 🏓 桌球教室管理與互動系統
-# 規格版本：v1.15 |  管理者點名日期過濾/Tab5去重複/課程分組
+# 規格版本：v1.16 |  管理者點名新增天數輸入動態擴展日期選單
 # 資料表：7 張（Users / Tables / Courses / Enrollments /
 #              ClassSessions / Attendance / LeaveRequests / Payments）
 # ============================================================
@@ -288,7 +288,7 @@ def login_page():
         st.markdown("<br>",unsafe_allow_html=True)
         st.markdown('<div class="page-title" style="text-align:center;">🏓 桌球教室管理與互動系統</div>',
                     unsafe_allow_html=True)
-        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.15</p>',
+        st.markdown('<p style="text-align:center;color:#888;">Ping-Pong Academy Manager v1.16</p>',
                     unsafe_allow_html=True)
         st.divider()
         username = st.text_input("帳號", placeholder="請輸入帳號")
@@ -760,11 +760,29 @@ def page_admin_attendance_mark():
 
     noter = st.session_state.get("profile_name","")  # 登入管理者姓名
 
-    # ── 選擇日期：今天 + 前 7 天（共 8 天），台灣時間 ───────────
+    # ── 天數輸入格（v1.16）：控制未來可查詢天數，固定含歷史 7 天 ──
     wd_names = ["一","二","三","四","五","六","日"]
+
+    future_days = st.number_input(
+        "查詢天數（今天往後幾天）",
+        min_value=1, max_value=90, value=1, step=1,
+        key="adm_att_days",
+        help="輸入 1 = 只含今天；輸入 10 = 今天往後 10 天（固定包含今天往前 7 天歷史日期）"
+    )
+
+    # ── 日期選單：未來 N 天（由遠到近）+ 今天 + 歷史 7 天（由新到舊）──
+    today = today_tw()
     date_opts_admin = []
+
+    # 未來日期（今天+1 ~ 今天+future_days-1），由遠到近排列在最上
+    for i in range(int(future_days) - 1, 0, -1):
+        d = today + timedelta(days=i)
+        label = f"{d.isoformat()}（週{wd_names[d.weekday()]}）"
+        date_opts_admin.append((label, d))
+
+    # 今天 + 歷史 7 天（由新到舊）
     for i in range(8):
-        d = today_tw() - timedelta(days=i)
+        d = today - timedelta(days=i)
         label = f"{d.isoformat()}（週{wd_names[d.weekday()]}）"
         date_opts_admin.append((label, d))
 
